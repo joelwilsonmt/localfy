@@ -1,0 +1,17 @@
+# Secrets & local config — NEVER commit
+.env
+
+# Runtime data / downloads (host-mounted volumes)
+/data/
+/music/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+*.swp

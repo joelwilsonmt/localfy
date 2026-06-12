@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Localfy{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+{% block nav %}
+<nav>
+  <a class="nav-logo" href="/dashboard">localfy</a>
+  <div class="nav-links">
+    <a href="/dashboard">Library</a>
+    <a href="/settings">Settings</a>
+    <a href="/auth/logout">Disconnect</a>
+  </div>
+</nav>
+{% endblock %}
+
+<!-- Player: lives outside #app-content so it's never destroyed by SPA navigation -->
+<div id="player" class="player" style="display:none">
+  <div class="player-left">
+    <div id="player-art-wrap"><div class="player-art-ph">♫</div></div>
+    <div class="player-track-info">
+      <div class="player-title" id="player-title">—</div>
+      <div class="player-artist" id="player-artist">Select a track</div>
+    </div>
+  </div>
+  <div class="player-center">
+    <div class="player-controls">
+      <button class="ctrl-btn ctrl-toggle" id="btn-shuffle" title="Shuffle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      </button>
+      <button class="ctrl-btn" id="btn-prev" title="Previous">⏮</button>
+      <button class="ctrl-btn ctrl-play" id="btn-play" title="Play/Pause">▶</button>
+      <button class="ctrl-btn" id="btn-next" title="Next">⏭</button>
+      <button class="ctrl-btn ctrl-toggle" id="btn-repeat" title="Repeat off"></button>
+    </div>
+    <div class="player-scrubber">
+      <span class="player-time" id="time-cur">0:00</span>
+      <input type="range" class="player-seek" id="seek" value="0" min="0" max="100" step="0.1">
+      <span class="player-time" id="time-dur">0:00</span>
+    </div>
+  </div>
+  <div class="player-right">
+    <span class="vol-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+    </span>
+    <input type="range" class="player-vol" id="vol" value="80" min="0" max="100">
+  </div>
+  <audio id="audio"></audio>
+</div>
+
+<!-- Global script: runs once. Player + SPA nav. Must come before #app-content scripts. -->
+<script>
+(function () {
+  // ── Player ────────────────────────────────────────────────
+  const audio   = document.getElementById('audio');
+  const playerEl = document.getElementById('player');
+  const artWrap  = document.getElementById('player-art-wrap');
+  const titleEl  = document.getElementById('player-title');
+  const artistEl = document.getElementById('player-artist');
+  const btnPlay  = document.getElementById('btn-play');
+  const btnPrev  = document.getElementById('btn-prev');
+  const btnNext  = document.getElementById('btn-next');
+  const btnShuffle = document.getElementById('btn-shuffle');
+  const btnRepeat  = document.getElementById('btn-repeat');
+  const seekEl   = document.getElementById('seek');
+  const timeCur  = document.getElementById('time-cur');
+  const timeDur  = document.getElementById('time-dur');
+  const volEl    = document.getElementById('vol');
+
+  let _tracks = [], _index = -1, _targetId = null, _imageUrl = null, _seeking = false;
+  let _shuffle = false, _repeat = 0;   // repeat: 0 = off, 1 = all, 2 = one track
+  let _order = [], _orderPos = 0;      // playback order as indices into _tracks
+
+  function _shuffleOrder() {
+    for (let i = _order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [_order[i], _order[j]] = [_order[j], _order[i]];
+    }
+  }
+  function _buildOrder() {
+    _order = _tracks.map((_, i) => i);
+    if (_shuffle) {
+      _shuffleOrder();
+      if (_index >= 0) {                       // start the shuffle from the current track
+        const at = _order.indexOf(_index);
+        if (at > 0) [_order[0], _order[at]] = [_order[at], _order[0]];
+      }
+    }
+    _orderPos = Math.max(0, _order.indexOf(_index));
+  }
+  // Auto-advance target when a track ends. Returns the next track index, or
+  // null when the queue is finished and we're not repeating the whole list.
+  function _stepEnded() {
+    if (!_tracks.length) return null;
+    let pos = _orderPos + 1;
+    if (pos >= _order.length) {
+      if (_repeat !== 1) return null;          // end of queue, repeat-all off → stop
+      if (_shuffle) _shuffleOrder();           // fresh shuffle on each loop
+      pos = 0;
+    }
+    _orderPos = pos;
+    return _order[pos];
+  }
+  // Manual prev/next always moves (wrapping), regardless of repeat mode.
+  function _move(dir) {
+    if (!_tracks.length) return;
+    _orderPos = (_orderPos + dir + _order.length) % _order.length;
+    _loadTrack(_order[_orderPos]);
+  }
+  // Lucide-style repeat icons; the "one" variant adds a small 1 in the loop.
+  const _ICON_REPEAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>';
+  const _ICON_REPEAT_ONE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/><path d="M11 14v-4l-1 .6"/></svg>';
+  function _updateModes() {
+    btnShuffle.classList.toggle('active', _shuffle);
+    btnRepeat.classList.toggle('active', _repeat !== 0);
+    btnRepeat.innerHTML = _repeat === 2 ? _ICON_REPEAT_ONE : _ICON_REPEAT;
+    btnRepeat.title = _repeat === 0 ? 'Repeat off' : _repeat === 1 ? 'Repeat all' : 'Repeat one';
+    audio.loop = false;   // looping is handled manually so 'ended' still fires
+  }
+
+  function fmt(s) {
+    if (!isFinite(s) || isNaN(s)) return '0:00';
+    return `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
+  }
+
+  function _save() {
+    try {
+      sessionStorage.setItem('lfy_player', JSON.stringify({
+        tracks: _tracks, index: _index, targetId: _targetId, imageUrl: _imageUrl,
+        time: audio.currentTime, volume: audio.volume,
+        shuffle: _shuffle, repeat: _repeat,
+      }));
+    } catch (_) {}
+  }
+
+  function _setArt(url) {
+    _imageUrl = url;
+    artWrap.innerHTML = url
+      ? `<img class="player-art" src="${url}" alt="">`
+      : `<div class="player-art-ph">♫</div>`;
+  }
+
+  function _highlightRows() {
+    const list = document.getElementById('track-list');
+    if (!list) return;
+    const match = list.dataset.targetId === _targetId;
+    let dlCount = 0;
+    list.querySelectorAll('.track-row').forEach(row => {
+      const isDl = row.dataset.downloaded === 'true';
+      row.classList.toggle('active', match && isDl && dlCount === _index);
+      if (isDl) dlCount++;
+    });
+  }
+
+  function _loadTrack(index, autoplay) {
+    if (index < 0 || index >= _tracks.length) return;
+    _index = index;
+    const t = _tracks[index];
+    audio.pause();
+    audio.src = `/stream/${_targetId}/${encodeURIComponent(t.filename)}`;
+    audio.load();
+    audio.volume = volEl.value / 100;
+    seekEl.value = 0;
+    timeCur.textContent = '0:00';
+    timeDur.textContent = '0:00';
+    titleEl.textContent = t.title || t.filename;
+    artistEl.textContent = t.artist || '';
+    playerEl.style.display = '';
+    _highlightRows();
+    _save();
+    if (autoplay !== false) audio.play().catch(() => {});
+  }
+
+  btnPlay.addEventListener('click', () => {
+    if (_index === -1 && _tracks.length) { _loadTrack(_order[0] ?? 0); return; }
+    audio.paused ? audio.play().catch(() => {}) : audio.pause();
+  });
+  btnPrev.addEventListener('click', () => {
+    if (audio.currentTime > 3) { audio.currentTime = 0; return; }
+    _move(-1);
+  });
+  btnNext.addEventListener('click', () => _move(1));
+  audio.addEventListener('ended', () => {
+    if (_repeat === 2) { _loadTrack(_index); return; }   // repeat one
+    const next = _stepEnded();
+    if (next !== null) _loadTrack(next);                  // else stop at end of queue
+  });
+  btnShuffle.addEventListener('click', () => {
+    _shuffle = !_shuffle;
+    btnShuffle.blur();
+    _buildOrder();
+    _updateModes();
+    _save();
+  });
+  btnRepeat.addEventListener('click', () => {
+    _repeat = (_repeat + 1) % 3;
+    btnRepeat.blur();
+    _updateModes();
+    _save();
+  });
+  audio.addEventListener('play',  () => { btnPlay.textContent = '⏸'; });
+  audio.addEventListener('pause', () => { btnPlay.textContent = '▶'; });
+
+  seekEl.addEventListener('mousedown', () => { _seeking = true; });
+  seekEl.addEventListener('touchstart', () => { _seeking = true; }, { passive: true });
+  seekEl.addEventListener('input', () => {
+    if (isFinite(audio.duration)) timeCur.textContent = fmt((seekEl.value / 100) * audio.duration);
+  });
+  function _finishSeek() {
+    if (!_seeking) return;
+    _seeking = false;
+    if (isFinite(audio.duration)) audio.currentTime = (seekEl.value / 100) * audio.duration;
+  }
+  seekEl.addEventListener('mouseup', _finishSeek);
+  seekEl.addEventListener('touchend', _finishSeek);
+
+  audio.addEventListener('timeupdate', () => {
+    if (_seeking || !isFinite(audio.duration) || !audio.duration) return;
+    seekEl.value = (audio.currentTime / audio.duration) * 100;
+    timeCur.textContent = fmt(audio.currentTime);
+    timeDur.textContent = fmt(audio.duration);
+    if (Math.round(audio.currentTime) % 5 === 0) _save();
+  });
+  audio.addEventListener('loadedmetadata', () => { timeDur.textContent = fmt(audio.duration); });
+  volEl.addEventListener('input', () => { audio.volume = volEl.value / 100; _save(); });
+
+  // Restore previous session
+  (function _restore() {
+    const raw = sessionStorage.getItem('lfy_player');
+    if (!raw) return;
+    try {
+      const s = JSON.parse(raw);
+      if (!s || s.index < 0 || !s.tracks?.length) return;
+      _tracks = s.tracks; _index = s.index; _targetId = s.targetId;
+      _shuffle = !!s.shuffle; _repeat = s.repeat || 0;
+      _buildOrder();
+      volEl.value = (s.volume || 0.8) * 100;
+      const t = _tracks[_index];
+      titleEl.textContent = t.title || t.filename;
+      artistEl.textContent = t.artist || '';
+      _setArt(s.imageUrl || null);
+      audio.src = `/stream/${_targetId}/${encodeURIComponent(t.filename)}`;
+      audio.volume = s.volume || 0.8;
+      if (s.time > 0) {
+        audio.addEventListener('loadedmetadata', () => { audio.currentTime = s.time; }, { once: true });
+      }
+      playerEl.style.display = '';
+    } catch (_) {}
+  })();
+
+  _updateModes();   // reflect restored (or default) shuffle/repeat state in the UI
+
+  // Public API used by detail page scripts
+  window.PLAYER = {
+    load(tracks, index, targetId, imageUrl) {
+      _tracks = tracks; _targetId = targetId; _index = index;
+      if (imageUrl !== _imageUrl) _setArt(imageUrl || null);
+      _buildOrder();
+      _loadTrack(index);
+    },
+    highlightRows: _highlightRows,
+    isPlaying(targetId, index) {
+      return _targetId === targetId && _index === index && !audio.paused;
+    },
+    get index()    { return _index; },
+    get targetId() { return _targetId; },
+  };
+
+  // ── SPA Navigation ────────────────────────────────────────
+  function _showSpinner() {
+    document.getElementById('app-content').innerHTML =
+      '<div class="page-loading"><div class="spinner"></div></div>';
+  }
+
+  async function navigateTo(url, pushState) {
+    if (pushState !== false) history.pushState({}, '', url);
+    _showSpinner();
+    try {
+      const res = await fetch(url);
+      const finalPath = new URL(res.url).pathname;
+      const wantedPath = new URL(url, location.href).pathname;
+      if (finalPath !== wantedPath) { window.location.href = res.url; return; }
+
+      const text = await res.text();
+      const doc = new DOMParser().parseFromString(text, 'text/html');
+      const newBlock = doc.getElementById('app-content');
+      if (!newBlock) { window.location.href = url; return; }
+
+      document.getElementById('app-content').innerHTML = newBlock.innerHTML;
+      document.title = doc.title;
+      window.scrollTo(0, 0);
+
+      document.getElementById('app-content').querySelectorAll('script').forEach(old => {
+        const s = document.createElement('script');
+        s.textContent = old.textContent;
+        old.replaceWith(s);
+      });
+
+      window.PLAYER.highlightRows();
+    } catch (_) {
+      window.location.href = url;
+    }
+  }
+
+  document.addEventListener('click', e => {
+    const a = e.target.closest('a[href]');
+    if (!a || a.target || a.download) return;
+    const href = a.getAttribute('href');
+    if (!href || href.startsWith('http') || href.startsWith('#')) return;
+    if (href === '/auth/logout') {
+      if (!confirm('Disconnect your Spotify account? You\'ll need to log in again.')) e.preventDefault();
+      return;
+    }
+    if (href.startsWith('/auth/')) return;
+    e.preventDefault();
+    navigateTo(href);
+  });
+
+  window.addEventListener('popstate', () => navigateTo(location.pathname + location.search, false));
+  window.navigateTo = navigateTo;
+
+  // ── Spacebar play/pause ───────────────────────────────────
+  const _TEXT_INPUT_TYPES = new Set([
+    'text', 'search', 'email', 'password', 'number', 'url', 'tel',
+    'date', 'datetime-local', 'month', 'week', 'time',
+  ]);
+  document.addEventListener('keydown', e => {
+    if (e.code !== 'Space') return;
+    const active = document.activeElement;
+    // Only let space do its normal thing inside actual text-entry fields;
+    // everywhere else (incl. focused range sliders / buttons) it toggles playback.
+    if (active && (active.tagName === 'TEXTAREA' || active.isContentEditable ||
+        (active.tagName === 'INPUT' && _TEXT_INPUT_TYPES.has(active.type)))) return;
+    if (_index === -1) return;
+    e.preventDefault();
+    audio.paused ? audio.play().catch(() => {}) : audio.pause();
+  });
+})();
+</script>
+
+<!-- Swappable page content -->
+<div id="app-content">
+{% block content %}{% endblock %}
+{% block scripts %}{% endblock %}
+</div>
+
+</body>
+</html>

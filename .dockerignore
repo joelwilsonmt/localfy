@@ -1,0 +1,12 @@
+.env
+.git
+.github
+data/
+music/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+README.md

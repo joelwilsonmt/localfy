@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% block title %}{{ target.name }} — Localfy{% endblock %}
+
+{% block content %}
+{% set downloaded_count = tracks | selectattr("downloaded") | list | length %}
+{% set total_count = tracks | length %}
+
+<div class="page detail-page">
+  <a href="/dashboard" class="back-link">← Library</a>
+
+  <div class="detail-header">
+    {% if target.image_url %}
+    <img class="detail-art" src="{{ target.image_url }}" alt="">
+    {% else %}
+    <div class="detail-art-placeholder">
+      {% if target.type == "liked_songs" %}♥{% elif target.type == "album" %}💿{% else %}♫{% endif %}
+    </div>
+    {% endif %}
+    <div class="detail-meta">
+      <div class="detail-type">{{ target.type | replace("_", " ") | title }}</div>
+      <h1 class="detail-title">{{ target.name }}</h1>
+      <div class="detail-counts">
+        <span>{{ total_count }} tracks</span>
+        {% if downloaded_count > 0 %}
+        <span class="dot">·</span>
+        <span class="downloaded-count {% if downloaded_count == total_count %}count-full{% else %}count-partial{% endif %}">
+          {{ downloaded_count }} downloaded
+        </span>
+        {% endif %}
+        {% if target.last_synced %}
+        <span class="dot">·</span>
+        <span>Last synced {{ target.last_synced[:10] }}</span>
+        {% endif %}
+      </div>
+      <div style="margin-top:.75rem; display:flex; align-items:center; gap:.75rem; flex-wrap:wrap;">
+        {% if downloaded_count < total_count or spotify_error %}
+        <button class="btn-sync-dl" id="detail-sync-btn">
+          ↻ {% if downloaded_count == 0 %}Sync &amp; Download{% else %}Sync remaining{% endif %}
+        </button>
+        <div class="detail-sync-progress" id="detail-sync-progress" style="display:none">
+          <div class="sync-progress-bar" style="width:120px">
+            <div class="sync-progress-fill" id="detail-progress-fill"></div>
+          </div>
+          <span class="sync-progress-text" id="detail-progress-text"></span>
+        </div>
+        {% endif %}
+        {% if downloaded_count > 0 %}
+        <a href="/targets/{{ target.id }}/download-zip" download class="btn-zip-dl">
+          ⬇ ZIP
+        </a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% if spotify_error %}
+  <div class="error-banner" style="margin-bottom:1.5rem">
+    {% if '403' in spotify_error %}
+      Spotify's API restricts access to this playlist's track list — this happens with some public playlists not owned by you. You can still sync and download it using the button above.
+    {% else %}
+      Couldn't load tracks from Spotify: {{ spotify_error }}
+    {% endif %}
+    {% if downloaded_count > 0 %} Your downloaded tracks are listed below.{% endif %}
+  </div>
+  {% endif %}
+
+  {% if tracks %}
+  <div class="track-list-header">
+    <span class="tl-num">#</span>
+    <span class="tl-title">Title</span>
+    <span class="tl-artist">Artist</span>
+    <span class="tl-action"></span>
+  </div>
+  <div class="track-list" id="track-list" data-target-id="{{ target.id }}">
+    {% for track in tracks %}
+    <div class="track-row {% if not track.downloaded %}not-downloaded{% endif %}"
+         data-index="{{ loop.index0 }}"
+         data-downloaded="{{ 'true' if track.downloaded else 'false' }}"
+         data-track-id="{{ track.id or '' }}"
+         data-filename="{{ track.filename or '' }}">
+      <div class="track-num-cell">
+        <span class="track-num">{{ loop.index }}</span>
+        {% if track.downloaded %}<span class="track-play-icon" aria-hidden="true">▶</span>{% endif %}
+      </div>
+      <span class="track-title">{{ track.name }}</span>
+      <span class="track-artist">{{ track.artist }}</span>
+      <div class="track-action">
+        {% if not track.downloaded and track.id %}
+        <button class="btn-track-dl" data-track-id="{{ track.id }}" title="Download track">⬇</button>
+        {% elif track.downloaded %}
+        <span class="track-dl-done" title="Downloaded">✓</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p>No tracks found.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if tracks %}
+<script>
+(function () {
+  const TARGET_ID = {{ target.id | tojson }};
+  const IMAGE_URL = {{ (target.image_url or '') | tojson }};
+
+  function buildTrackList() {
+    const rows = document.querySelectorAll('#track-list .track-row');
+    return Array.from(rows)
+      .filter(r => r.dataset.downloaded === 'true')
+      .map(r => ({
+        filename: r.dataset.filename,
+        title: r.querySelector('.track-title')?.textContent.trim() || '',
+        artist: r.querySelector('.track-artist')?.textContent.trim() || '',
+      }));
+  }
+
+  window.PLAYER.highlightRows();
+
+  // ── Track row clicks (downloaded tracks → play) ───────────
+  document.getElementById('track-list').addEventListener('click', e => {
+    const row = e.target.closest('.track-row');
+    if (!row) return;
+
+    if (row.dataset.downloaded === 'true') {
+      // Find its index within downloaded tracks only
+      const allRows = Array.from(document.querySelectorAll('#track-list .track-row'));
+      const dlRows = allRows.filter(r => r.dataset.downloaded === 'true');
+      const dlIndex = dlRows.indexOf(row);
+      if (dlIndex === -1) return;
+
+      if (window.PLAYER.isPlaying(TARGET_ID, dlIndex)) {
+        document.getElementById('audio').pause();
+      } else {
+        window.PLAYER.load(buildTrackList(), dlIndex, TARGET_ID, IMAGE_URL || null);
+      }
+      return;
+    }
+
+    // Not downloaded: trigger download on row click (same as button)
+    const btn = row.querySelector('.btn-track-dl');
+    if (btn && !btn.disabled) btn.click();
+  });
+
+  // ── Sync & Download button ────────────────────────────────
+  const syncBtn = document.getElementById('detail-sync-btn');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', async () => {
+      syncBtn.disabled = true;
+      syncBtn.textContent = '↻ Starting…';
+      const progressWrap = document.getElementById('detail-sync-progress');
+      const fill = document.getElementById('detail-progress-fill');
+      const text = document.getElementById('detail-progress-text');
+      if (progressWrap) progressWrap.style.display = 'flex';
+
+      const alreadyEnabled = {{ 'true' if target.enabled else 'false' }};
+      if (!alreadyEnabled) {
+        await fetch(`/targets/${TARGET_ID}/toggle`, { method: 'POST' });
+      }
+      await fetch(`/targets/${TARGET_ID}/sync`, { method: 'POST' });
+
+      const poll = setInterval(async () => {
+        try {
+          const res = await fetch(`/targets/${TARGET_ID}/progress`);
+          const p = await res.json();
+          if (p.status === 'running') {
+            const done = (p.downloaded || 0) + (p.skipped || 0);
+            const total = p.total || 0;
+            if (fill) fill.style.width = total > 0 ? Math.min(100, Math.round(done / total * 100)) + '%' : '30%';
+            const parts = [];
+            if (p.downloaded > 0) parts.push(`${p.downloaded} downloaded`);
+            if (p.skipped > 0) parts.push(`${p.skipped} skipped`);
+            if (total > 0) parts.push(`of ${total}`);
+            if (text) text.textContent = parts.join(' · ') || 'Working…';
+            syncBtn.textContent = '↻ Syncing…';
+          } else if (p.status === 'done' || p.status === 'error') {
+            clearInterval(poll);
+            window.navigateTo(location.pathname, false);
+          }
+        } catch (_) {}
+      }, 1500);
+
+      setTimeout(() => { clearInterval(poll); window.navigateTo(location.pathname, false); }, 600000);
+    });
+  }
+
+  // ── Per-track download buttons ────────────────────────────
+  document.querySelectorAll('.btn-track-dl').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const trackId = btn.dataset.trackId;
+      if (!trackId) return;
+      btn.textContent = '⟳';
+      btn.disabled = true;
+      btn.classList.add('downloading');
+
+      await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/download`, { method: 'POST' });
+
+      const poll = setInterval(async () => {
+        try {
+          const res = await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/status`);
+          const { status } = await res.json();
+          if (status === 'done') {
+            clearInterval(poll);
+            window.navigateTo(location.pathname, false);
+          } else if (status === 'error') {
+            clearInterval(poll);
+            btn.textContent = '⬇';
+            btn.disabled = false;
+            btn.classList.remove('downloading');
+          }
+        } catch (_) {}
+      }, 2000);
+
+      setTimeout(() => clearInterval(poll), 180000);
+    });
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

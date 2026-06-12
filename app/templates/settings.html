@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Settings — Localfy{% endblock %}
+
+{% block content %}
+<div class="page">
+  <div class="section-header" style="margin-bottom: 1.5rem;">
+    <h2>Settings</h2>
+  </div>
+
+  <div class="settings-card">
+    <h3>Download Configuration</h3>
+    <div class="field">
+      <label>Download Path</label>
+      <input type="text" value="{{ download_path }}" readonly>
+      <div class="field-hint">Set via the <code>DOWNLOAD_PATH</code> environment variable.</div>
+    </div>
+    <div class="field">
+      <label>Audio Format</label>
+      <select id="sel-format">
+        {% for fmt in ["mp3", "flac", "ogg", "opus", "m4a", "wav"] %}
+        <option value="{{ fmt }}" {% if audio_format == fmt %}selected{% endif %}>{{ fmt }}</option>
+        {% endfor %}
+      </select>
+      <div class="field-hint">
+        YouTube audio is ~128 kbps AAC or 160 kbps Opus — that's the quality ceiling regardless of
+        format. <strong style="color:var(--text)">opus</strong> and <strong style="color:var(--text)">m4a</strong>
+        are the best choices: ffmpeg can remux the original stream without re-encoding, avoiding
+        the generation loss of transcoding to mp3. mp3 has the widest device compatibility.
+        Lossless formats (flac, wav) produce much larger files with no quality benefit.
+      </div>
+    </div>
+    <button class="btn-save" id="btn-save-audio" onclick="saveAudio()">Save</button>
+    <span id="audio-saved" style="font-size:.8rem; color:var(--green); margin-left:.75rem; opacity:0; transition:opacity .3s">Saved</span>
+  </div>
+
+  <div class="settings-card">
+    <h3>Sync Behaviour</h3>
+    <div class="field">
+      <label class="toggle-label">
+        <span>Delete removed tracks on sync</span>
+        <label class="track-label" style="margin-left:auto">
+          <input type="checkbox" id="chk-sync-delete" class="track-checkbox"
+                 {% if sync_delete_removed %}checked{% endif %}
+                 onchange="updateSyncDelete(this.checked)">
+          <span class="track-box"></span>
+          <span class="track-text" id="sync-delete-text">{% if sync_delete_removed %}On{% else %}Off{% endif %}</span>
+        </label>
+      </label>
+      <div class="field-hint">
+        When enabled, songs removed from a Spotify playlist will also be deleted from your
+        local download folder on the next sync. When disabled (default), local files are kept
+        even if you remove the track from Spotify.
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-card">
+    <h3>Spotify Account</h3>
+    <p style="font-size:.9rem; margin-bottom:1rem; color: var(--muted);">
+      Your Spotify account is connected. Disconnecting will remove the stored token
+      and you'll need to log in again.
+    </p>
+    <a href="/auth/logout" class="btn-danger">Disconnect Spotify</a>
+  </div>
+
+  <div class="settings-card">
+    <h3>About</h3>
+    <p style="font-size:.85rem; color: var(--muted); line-height: 1.8;">
+      <strong style="color:var(--text)">localfy</strong> uses
+      <a href="https://github.com/spotDL/spotify-downloader" target="_blank">spotdl</a>
+      to download tracks from YouTube and tag them with Spotify metadata.<br>
+      Downloads are scheduled via APScheduler and run inside this container.<br>
+      Sync state is stored in <code>/data/localfy.db</code>.
+    </p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function saveAudio() {
+  const fmt = document.getElementById('sel-format').value;
+  await fetch('/settings/audio-format', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `audio_format=${fmt}`,
+  });
+  const saved = document.getElementById('audio-saved');
+  saved.style.opacity = '1';
+  setTimeout(() => { saved.style.opacity = '0'; }, 2000);
+}
+
+async function updateSyncDelete(enabled) {
+  const text = document.getElementById('sync-delete-text');
+  await fetch('/settings/sync-delete-removed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'enabled=' + (enabled ? 'true' : 'false'),
+  });
+  if (text) text.textContent = enabled ? 'On' : 'Off';
+}
+</script>
+{% endblock %}
