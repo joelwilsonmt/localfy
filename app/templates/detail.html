@@ -179,9 +179,15 @@
             if (total > 0) parts.push(`of ${total}`);
             if (text) text.textContent = parts.join(' · ') || 'Working…';
             syncBtn.textContent = '↻ Syncing…';
-          } else if (p.status === 'done' || p.status === 'error') {
+          } else if (p.status === 'done') {
             clearInterval(poll);
             window.navigateTo(location.pathname, false);
+          } else if (p.status === 'error') {
+            clearInterval(poll);
+            const msg = p.message ? String(p.message).replace(/\s+/g, ' ').trim().slice(-160) : 'Sync failed.';
+            if (text) { text.textContent = 'Error: ' + msg; text.style.color = 'var(--red)'; }
+            syncBtn.disabled = false;
+            syncBtn.textContent = '↻ Retry';
           }
         } catch (_) {}
       }, 1500);

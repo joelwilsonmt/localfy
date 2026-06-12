@@ -52,9 +52,22 @@ async def _run_sync(target_id: str, force: bool = False):
 
     try:
         if target["type"] == "playlist":
-            code, output = await downloader.sync_playlist(
-                target_id, target["spotify_url"], target["name"], on_line=on_line
-            )
+            # spotdl authenticates app-only (client credentials), which can't read
+            # PRIVATE playlists — even ones the user owns. So we resolve the track
+            # list ourselves (user-authenticated) and hand spotdl individual track
+            # URLs, whose metadata is public. Works for public and private alike.
+            all_tracks = spotify.get_playlist_tracks(target_id)
+            already = db.get_downloaded_ids(target_id)
+            new_tracks = [t for t in all_tracks if t["id"] not in already]
+            state["total"] = len(all_tracks)
+            state["skipped"] = len(all_tracks) - len(new_tracks)
+            prog.set_progress(target_id, {"status": "running", **state})   # show "0 of N" before downloads start
+            output_dir = downloader.music_dir(target)
+            ids = [t["id"] for t in new_tracks]
+            code, output = await downloader.download_tracks(ids, output_dir, on_line=on_line)
+            if code == 0:
+                for t in new_tracks:
+                    db.mark_downloaded(t["id"], t["name"], t["artist"], target_id)
         elif target["type"] == "album":
             code, output = await downloader.sync_album(
                 target_id, target["spotify_url"], target["name"], on_line=on_line
@@ -64,6 +77,8 @@ async def _run_sync(target_id: str, force: bool = False):
             already = db.get_downloaded_ids(target_id)
             new_tracks = [(tid, name, artist) for tid, name, artist in all_tracks if tid not in already]
             state["total"] = len(all_tracks)
+            state["skipped"] = len(all_tracks) - len(new_tracks)
+            prog.set_progress(target_id, {"status": "running", **state})   # show "0 of N" before downloads start
             output_dir = os.path.join(DOWNLOAD_PATH, "Liked Songs")
             ids = [t[0] for t in new_tracks]
             code, output = await downloader.download_tracks(ids, output_dir, on_line=on_line)
@@ -80,8 +95,10 @@ async def _run_sync(target_id: str, force: bool = False):
         logger.info("spotdl output for %s:\n%s", target["name"], output[-3000:])
 
         if code == 0:
-            info = spotify.get_liked_songs_info() if target["type"] == "liked_songs" else None
-            count = info["track_count"] if info else target["track_count"]
+            if target["type"] == "liked_songs":
+                count = spotify.get_liked_songs_info()["track_count"]
+            else:
+                count = state["total"] or target["track_count"] or 0
             db.set_target_synced(target_id, count)
 
         prog.set_progress(target_id, {

@@ -1,6 +1,9 @@
 # Secrets & local config — NEVER commit
 .env
 
+# Local-dev compose override (re-adds build: .); server pulls the image
+docker-compose.override.yml
+
 # Runtime data / downloads (host-mounted volumes)
 /data/
 /music/
