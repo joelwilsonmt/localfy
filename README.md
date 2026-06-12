@@ -102,8 +102,9 @@ nothing is exposed to the public internet (only your tailnet can reach it).
 
 1. In the Tailscale **admin console**, enable **MagicDNS** and **HTTPS
    certificates** (Settings → Keys / DNS).
-2. Run localfy normally (the default `docker-compose.yml`, listening on
-   `127.0.0.1:8080` is fine — you don't need to expose it publicly).
+2. Run localfy with the default `docker-compose.yml`, but set **`BIND_ADDR=127.0.0.1`**
+   in `.env` first — this keeps the port off your LAN/public interfaces so the
+   only way in is through `tailscale serve`.
 3. Find your machine's full name with `tailscale status` (e.g.
    `myserver.tailnet-abcd.ts.net`).
 4. Put localfy behind Tailscale's HTTPS proxy:
