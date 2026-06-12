@@ -32,17 +32,20 @@
         <span>Last synced {{ target.last_synced[:10] }}</span>
         {% endif %}
       </div>
+      {% if total_count > 0 %}
+      <div class="detail-progress" id="detail-progress">
+        <div class="sync-progress-bar" style="max-width:260px">
+          <div class="sync-progress-fill" id="detail-progress-fill"
+               style="width: {{ (100 * downloaded_count // total_count) }}%"></div>
+        </div>
+        <span class="sync-progress-text" id="detail-progress-text">{{ downloaded_count }} of {{ total_count }} downloaded</span>
+      </div>
+      {% endif %}
       <div style="margin-top:.75rem; display:flex; align-items:center; gap:.75rem; flex-wrap:wrap;">
         {% if downloaded_count < total_count or spotify_error %}
         <button class="btn-sync-dl" id="detail-sync-btn">
           ↻ {% if downloaded_count == 0 %}Sync &amp; Download{% else %}Sync remaining{% endif %}
         </button>
-        <div class="detail-sync-progress" id="detail-sync-progress" style="display:none">
-          <div class="sync-progress-bar" style="width:120px">
-            <div class="sync-progress-fill" id="detail-progress-fill"></div>
-          </div>
-          <span class="sync-progress-text" id="detail-progress-text"></span>
-        </div>
         {% endif %}
         {% if downloaded_count > 0 %}
         <a href="/targets/{{ target.id }}/download-zip" download class="btn-zip-dl">
@@ -153,10 +156,8 @@
     syncBtn.addEventListener('click', async () => {
       syncBtn.disabled = true;
       syncBtn.textContent = '↻ Starting…';
-      const progressWrap = document.getElementById('detail-sync-progress');
       const fill = document.getElementById('detail-progress-fill');
       const text = document.getElementById('detail-progress-text');
-      if (progressWrap) progressWrap.style.display = 'flex';
 
       const alreadyEnabled = {{ 'true' if target.enabled else 'false' }};
       if (!alreadyEnabled) {

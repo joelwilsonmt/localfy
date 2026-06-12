@@ -7,6 +7,13 @@
   <div class="error-banner">{{ error }}</div>
   {% endif %}
 
+  <div class="dash-search-wrap">
+    <span class="dash-search-icon" aria-hidden="true">⌕</span>
+    <input type="search" id="dash-search" class="dash-search"
+           placeholder="Filter by name…" autocomplete="off" spellcheck="false">
+  </div>
+  <div id="dash-no-results" class="dash-no-results" style="display:none">No matches.</div>
+
   {% set liked = items | selectattr("type", "eq", "liked_songs") | list %}
   {% set playlists = items | selectattr("type", "eq", "playlist") | list %}
   {% set albums = items | selectattr("type", "eq", "album") | list %}
@@ -55,11 +62,19 @@
           {% endif %}
           {% if item.type == "playlist" %}&nbsp;· playlist{% elif item.type == "album" %}&nbsp;· album{% endif %}
         </div>
-        <div class="sync-progress-wrap" id="progress-wrap-{{ item.id }}" style="display:none">
+        {% set total = item.track_count or 0 %}
+        {% set show_bar = total > 0 and (enabled or local > 0) %}
+        {% set pct = (100 * local // total) if total > 0 else 0 %}
+        <div class="sync-progress-wrap" id="progress-wrap-{{ item.id }}"
+             data-local="{{ local }}" data-total="{{ total }}"
+             {% if not show_bar %}style="display:none"{% endif %}>
           <div class="sync-progress-bar">
-            <div class="sync-progress-fill" id="progress-fill-{{ item.id }}"></div>
+            <div class="sync-progress-fill" id="progress-fill-{{ item.id }}"
+                 style="width: {{ pct }}%"></div>
           </div>
-          <span class="sync-progress-text" id="progress-text-{{ item.id }}"></span>
+          <span class="sync-progress-text" id="progress-text-{{ item.id }}">
+            {% if show_bar %}{{ local }} of {{ total }} downloaded{% endif %}
+          </span>
         </div>
       </div>
 
@@ -173,6 +188,24 @@ function _updateProgressUI(id, p) {
   if (text) text.textContent = parts.join(' · ') || 'Preparing…';
 }
 
+// Settle the bar into its resting "x of y downloaded" state from the wrap's
+// data-local / data-total (updated after a sync). Hides it when nothing's local.
+function _restingProgress(id) {
+  const wrap = document.getElementById('progress-wrap-' + id);
+  if (!wrap) return;
+  const local = +wrap.dataset.local || 0;
+  const total = +wrap.dataset.total || 0;
+  const fill = document.getElementById('progress-fill-' + id);
+  const text = document.getElementById('progress-text-' + id);
+  if (total > 0 && local > 0) {
+    wrap.style.display = 'flex';
+    if (fill) { fill.style.width = Math.min(100, Math.round(local / total * 100)) + '%'; fill.classList.remove('indeterminate'); }
+    if (text) text.textContent = `${local} of ${total} downloaded`;
+  } else {
+    wrap.style.display = 'none';
+  }
+}
+
 function startPolling(id, triggerSync) {
   if (_activePolls.has(id)) return;
   _activePolls.add(id);
@@ -200,8 +233,15 @@ function startPolling(id, triggerSync) {
           clearInterval(interval);
           _activePolls.delete(id);
           if (btn) { btn.classList.remove('syncing'); btn.textContent = '↻ Sync'; btn.disabled = false; }
-          if (wrap) wrap.style.display = 'none';
-          if (fill) { fill.style.width = '0%'; fill.classList.remove('indeterminate'); }
+
+          // Update the resting download count from the final tallies, then
+          // settle the bar back to its "x of y downloaded" state.
+          if (p.status === 'done' && wrap && p.total) {
+            wrap.dataset.local = Math.min(p.total, (p.downloaded || 0) + (p.skipped || 0));
+            wrap.dataset.total = p.total;
+          }
+          if (fill) fill.classList.remove('indeterminate');
+          _restingProgress(id);
 
           const el = document.getElementById('synced-' + id);
           if (el) el.textContent = new Date().toISOString().slice(0, 10);
@@ -222,7 +262,7 @@ function startPolling(id, triggerSync) {
             clearInterval(interval);
             _activePolls.delete(id);
             if (btn) { btn.classList.remove('syncing'); btn.textContent = '↻ Sync'; btn.disabled = false; }
-            if (wrap) wrap.style.display = 'none';
+            _restingProgress(id);
           }
         }
       } catch (_) {}
@@ -232,7 +272,7 @@ function startPolling(id, triggerSync) {
       clearInterval(interval);
       _activePolls.delete(id);
       if (btn) { btn.classList.remove('syncing'); btn.textContent = '↻ Sync'; btn.disabled = false; }
-      if (wrap) wrap.style.display = 'none';
+      _restingProgress(id);
     }, 600000);
   }).catch(() => { _activePolls.delete(id); });
 }
@@ -262,6 +302,33 @@ document.querySelectorAll('.item-art-wrap[data-target-id]').forEach(wrap => {
       .catch(() => {});
   });
 });
+// ── Name filter ──────────────────────────────────────────────
+(function () {
+  const search = document.getElementById('dash-search');
+  if (!search) return;
+  const noResults = document.getElementById('dash-no-results');
+  function apply() {
+    const q = search.value.trim().toLowerCase();
+    let anyVisible = false;
+    document.querySelectorAll('.item-list').forEach(list => {
+      let shown = 0;
+      list.querySelectorAll('.item-card').forEach(card => {
+        const name = (card.querySelector('.item-name')?.textContent || '').toLowerCase();
+        const match = !q || name.includes(q);
+        card.style.display = match ? '' : 'none';
+        if (match) shown++;
+      });
+      // Hide the section header (previous sibling) when its list is empty.
+      const header = list.previousElementSibling;
+      if (header && header.classList.contains('section-header')) header.style.display = shown ? '' : 'none';
+      list.style.display = shown ? '' : 'none';
+      if (shown) anyVisible = true;
+    });
+    if (noResults) noResults.style.display = (q && !anyVisible) ? '' : 'none';
+  }
+  search.addEventListener('input', apply);
+})();
+
 document.querySelectorAll('.art-play-btn').forEach(btn => {
   btn.addEventListener('click', async e => {
     e.preventDefault();

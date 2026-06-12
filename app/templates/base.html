@@ -278,13 +278,27 @@
       '<div class="page-loading"><div class="spinner"></div></div>';
   }
 
+  // Scroll memory: remember where each page was scrolled so we can restore it
+  // on return. Exception: if you lingered on a detail page longer than this,
+  // returning to the library starts at the top instead of your old spot.
+  history.scrollRestoration = 'manual';
+  const _scrollPos = {};
+  let _curPath = location.pathname;
+  let _enterTime = Date.now();
+  const _DETAIL_LINGER_MS = 90 * 1000;   // 1:30
+
   async function navigateTo(url, pushState) {
+    const wantedPath = new URL(url, location.href).pathname;
+    // Snapshot the page we're leaving before we tear it down.
+    _scrollPos[_curPath] = window.scrollY;
+    const leavingDetail = _curPath.startsWith('/targets/');
+    const lingered = Date.now() - _enterTime;
+
     if (pushState !== false) history.pushState({}, '', url);
     _showSpinner();
     try {
       const res = await fetch(url);
       const finalPath = new URL(res.url).pathname;
-      const wantedPath = new URL(url, location.href).pathname;
       if (finalPath !== wantedPath) { window.location.href = res.url; return; }
 
       const text = await res.text();
@@ -294,7 +308,18 @@
 
       document.getElementById('app-content').innerHTML = newBlock.innerHTML;
       document.title = doc.title;
-      window.scrollTo(0, 0);
+
+      // Decide where to land.
+      let y = 0;
+      if (wantedPath === '/dashboard' && leavingDetail && lingered > _DETAIL_LINGER_MS) {
+        y = 0;                                  // lingered on a playlist → back to top
+      } else if (_scrollPos[wantedPath] != null) {
+        y = _scrollPos[wantedPath];             // restore previous position
+      }
+      window.scrollTo(0, y);
+      requestAnimationFrame(() => window.scrollTo(0, y));   // re-apply once layout settles
+      _curPath = wantedPath;
+      _enterTime = Date.now();
 
       document.getElementById('app-content').querySelectorAll('script').forEach(old => {
         const s = document.createElement('script');

@@ -336,6 +336,38 @@ select.schedule-select:focus { outline: none; border-color: var(--green); }
   white-space: nowrap;
 }
 
+/* ── Dashboard search ────────────────────────────────────── */
+.dash-search-wrap { position: relative; margin-bottom: 1.75rem; }
+.dash-search-icon {
+  position: absolute;
+  left: .85rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 1rem;
+  pointer-events: none;
+}
+.dash-search {
+  width: 100%;
+  padding: .6rem .9rem .6rem 2.2rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: .9rem;
+}
+.dash-search::placeholder { color: var(--muted); }
+.dash-search:focus { outline: none; border-color: var(--green); }
+.dash-no-results { color: var(--muted); text-align: center; padding: 2.5rem 0; }
+
+/* ── Detail completion bar ───────────────────────────────── */
+.detail-progress {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  margin-top: .6rem;
+}
+
 /* ── Toast ───────────────────────────────────────────────── */
 .toast-container {
   position: fixed;
@@ -719,12 +751,6 @@ select.schedule-select:focus { outline: none; border-color: var(--green); }
 }
 .btn-sync-dl:hover { background: #1ed760; }
 .btn-sync-dl:disabled { opacity: .6; cursor: default; }
-
-.detail-sync-progress {
-  display: flex;
-  align-items: center;
-  gap: .5rem;
-}
 
 .btn-zip-dl {
   display: inline-flex;
