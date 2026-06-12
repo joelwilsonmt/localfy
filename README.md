@@ -48,30 +48,14 @@ SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/auth/callback
 
 ### Option A — Pull the pre-built image (recommended)
 
-Replace `YOUR_GITHUB_USERNAME` and `YOUR_REPO_NAME` with your GitHub username and repository name.
+The shipped `docker-compose.yml` already points at the published image
+(`ghcr.io/joelwilsonmt/localfy:latest`). Grab just the two files you need:
 
 ```bash
-# docker-compose.yml — swap the build section for an image pull
-```
-
-Create a `docker-compose.yml` (or edit the existing one, replacing `build: .` with the image line):
-
-```yaml
-services:
-  localfy:
-    image: ghcr.io/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME:latest
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./music:/music
-      - ./data:/data
-    env_file: .env
-    restart: unless-stopped
-```
-
-Then:
-
-```bash
+mkdir localfy && cd localfy
+curl -O https://raw.githubusercontent.com/joelwilsonmt/localfy/main/docker-compose.yml
+curl -o .env https://raw.githubusercontent.com/joelwilsonmt/localfy/main/.env.example
+# edit .env with your Spotify credentials, then:
 docker compose pull
 docker compose up -d
 ```
@@ -79,9 +63,10 @@ docker compose up -d
 ### Option B — Build locally from source
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME.git
-cd YOUR_REPO_NAME
+git clone https://github.com/joelwilsonmt/localfy.git
+cd localfy
 cp .env.example .env   # fill in your values
+# edit docker-compose.yml: comment `image:`, uncomment `build: .`
 docker compose up -d --build
 ```
 

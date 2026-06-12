@@ -1,9 +1,9 @@
 services:
   localfy:
-    build: .
-    # To use the pre-built image instead of building locally, comment out `build: .`
-    # and uncomment the line below (replace with your repo):
-    # image: ghcr.io/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME:latest
+    image: ghcr.io/joelwilsonmt/localfy:latest
+    # For local development (build from source instead of pulling), comment out
+    # the `image:` line above and uncomment:
+    # build: .
     ports:
       - "8080:8080"
     volumes:
