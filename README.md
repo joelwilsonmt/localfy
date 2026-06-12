@@ -72,6 +72,76 @@ docker compose up -d --build
 
 ---
 
+## 3.5 — HTTPS for server installs
+
+**Why this matters:** Spotify only accepts `http://` for the `127.0.0.1` loopback
+address. For any other host (a server IP or domain) the redirect URI **must be
+HTTPS**, or the login will fail. Pick whichever fits your setup.
+
+### Option 1 — Caddy (public domain, automatic certs)
+
+Easiest if you have a domain. Requires an A/AAAA record pointed at the server and
+ports **80 + 443** open. A ready-made `docker-compose.caddy.yml` and `Caddyfile`
+are included.
+
+```bash
+# in your .env:
+#   LOCALFY_DOMAIN=localfy.yourdomain.com
+#   SPOTIFY_REDIRECT_URI=https://localfy.yourdomain.com/auth/callback
+docker compose -f docker-compose.caddy.yml up -d
+```
+
+Register `https://localfy.yourdomain.com/auth/callback` in the Spotify dashboard
+(must match exactly). Caddy fetches and auto-renews the Let's Encrypt cert.
+
+### Option 2 — Tailscale (no public domain, no open ports)
+
+If your server is on a [Tailscale](https://tailscale.com) tailnet, Tailscale can
+serve localfy over HTTPS on your machine's `*.ts.net` name with a valid cert — and
+nothing is exposed to the public internet (only your tailnet can reach it).
+
+1. In the Tailscale **admin console**, enable **MagicDNS** and **HTTPS
+   certificates** (Settings → Keys / DNS).
+2. Run localfy normally (the default `docker-compose.yml`, listening on
+   `127.0.0.1:8080` is fine — you don't need to expose it publicly).
+3. Find your machine's full name with `tailscale status` (e.g.
+   `myserver.tailnet-abcd.ts.net`).
+4. Put localfy behind Tailscale's HTTPS proxy:
+   ```bash
+   tailscale serve --bg --https=443 localhost:8080
+   ```
+   - Check it: `tailscale serve status`
+   - Undo it:  `tailscale serve --https=443 localhost:8080 off`  (or `tailscale serve reset`)
+5. In `.env` set
+   `SPOTIFY_REDIRECT_URI=https://myserver.tailnet-abcd.ts.net/auth/callback`,
+   restart localfy, and register that same URL in the Spotify dashboard.
+
+> The OAuth redirect happens in **your browser**, so the machine you log in from
+> must also be on the tailnet. If you need to reach it from outside the tailnet,
+> use `tailscale funnel` instead of `serve` to expose it publicly.
+
+### Option 3 — nginx (you already manage certs)
+
+Point a server block at the container and proxy to it:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name localfy.yourdomain.com;
+    # ssl_certificate / ssl_certificate_key managed by you (certbot, etc.)
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
+Set `SPOTIFY_REDIRECT_URI=https://localfy.yourdomain.com/auth/callback` and
+register it in the Spotify dashboard.
+
+---
+
 ## 4 — Use it
 
 1. Open `http://localhost:8080` (or `http://YOUR_SERVER:8080`).

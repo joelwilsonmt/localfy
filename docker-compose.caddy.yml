@@ -1,0 +1,43 @@
+# HTTPS deployment with Caddy (automatic Let's Encrypt certificates).
+#
+# Requires:
+#   - A domain with an A/AAAA record pointing at this server
+#   - Ports 80 and 443 open to the internet
+#   - LOCALFY_DOMAIN and SPOTIFY_REDIRECT_URI set in .env (see .env.example)
+#
+# Run with:
+#   docker compose -f docker-compose.caddy.yml up -d
+services:
+  localfy:
+    image: ghcr.io/joelwilsonmt/localfy:latest
+    expose:
+      - "8080"            # internal only — Caddy reaches it over the compose network
+    volumes:
+      - ${MUSIC_HOST_PATH:-./music}:/music
+      - ${DATA_HOST_PATH:-./data}:/data
+    environment:
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI}
+      - DOWNLOAD_PATH=${DOWNLOAD_PATH:-/music}
+      - DATA_PATH=${DATA_PATH:-/data}
+      - AUDIO_FORMAT=${AUDIO_FORMAT:-mp3}
+      - AUDIO_BITRATE=${AUDIO_BITRATE:-320k}
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - LOCALFY_DOMAIN=${LOCALFY_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,5 @@
+# Caddy automatically provisions and renews a Let's Encrypt cert for this domain.
+# The domain comes from the LOCALFY_DOMAIN variable in your .env file.
+{$LOCALFY_DOMAIN} {
+	reverse_proxy localfy:8080
+}
