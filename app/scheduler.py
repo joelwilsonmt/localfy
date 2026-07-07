@@ -65,9 +65,9 @@ def _norm(s: str) -> str:
     return _RE_NONWORD.sub('', (s or '').lower()).strip()
 
 
-def _present_index(output_dir: str) -> dict[str, list[str]]:
-    """Map normalized title → list of normalized artist strings for files on disk."""
-    idx: dict[str, list[str]] = {}
+def _present_index(output_dir: str) -> dict[str, list[tuple[str, str]]]:
+    """Map normalized title → [(normalized artist, filename)] for files on disk."""
+    idx: dict[str, list[tuple[str, str]]] = {}
     try:
         names = os.listdir(output_dir)
     except OSError:
@@ -77,12 +77,13 @@ def _present_index(output_dir: str) -> dict[str, list[str]]:
             continue
         stem = os.path.splitext(fname)[0]
         artist, title = stem.split(" - ", 1) if " - " in stem else ("", stem)
-        idx.setdefault(_norm(title), []).append(_norm(artist))
+        idx.setdefault(_norm(title), []).append((_norm(artist), fname))
     return idx
 
 
-def _song_present(idx: dict[str, list[str]], song: dict) -> bool:
-    """Is this song's file on disk? Requires a title match AND whole-word artist agreement.
+def _match_file(idx: dict[str, list[tuple[str, str]]], song: dict) -> str | None:
+    """The on-disk filename for this song, or None. Requires a title match AND
+    whole-word artist agreement.
 
     Title alone would falsely match a different artist's same-titled track (covers,
     "Intro", "Interlude") and permanently mark it downloaded. The on-disk artist is
@@ -95,20 +96,24 @@ def _song_present(idx: dict[str, list[str]], song: dict) -> bool:
     artist against an unknown one), so a metadata-poor "Intro" can't hijack a
     same-titled track that happens to already be on disk.
     """
-    file_artists = idx.get(_norm(song.get("name", "")))
-    if file_artists is None:
-        return False
+    entries = idx.get(_norm(song.get("name", "")))
+    if entries is None:
+        return None
     primary_tokens = set(_norm(song.get("artist", "")).split())
     full_tokens = set(_norm(" ".join(song.get("artists") or [song.get("artist", "")])).split())
-    for fa in file_artists:
+    for fa, fname in entries:
         fa_tokens = set(fa.split())
         if not fa_tokens or not primary_tokens:
             if not fa_tokens and not primary_tokens:
-                return True   # both artist-less; the title match is all there is
+                return fname   # both artist-less; the title match is all there is
             continue
         if primary_tokens <= fa_tokens or fa_tokens <= full_tokens:
-            return True
-    return False
+            return fname
+    return None
+
+
+def _song_present(idx: dict[str, list[tuple[str, str]]], song: dict) -> bool:
+    return _match_file(idx, song) is not None
 
 
 def track_on_disk(output_dir: str, song: dict) -> bool:
@@ -229,6 +234,14 @@ async def _sync_target(target_id: str, force: bool):
             # every type above), so albums no longer report a stale track_count.
             count = state["total"] or target["track_count"] or 0
             db.set_target_synced(target_id, count)
+            # Regenerate the folder's .m3u8 (Spotify order) for external players.
+            try:
+                idx = _present_index(output_dir)
+                ordered = [{"filename": fn, "title": s["name"], "artist": s["artist"]}
+                           for s in all_songs if (fn := _match_file(idx, s))]
+                downloader.write_m3u(target, ordered)
+            except Exception:
+                logger.exception("Couldn't write playlist file for %s", target_id)
 
         prog.set_progress(target_id, {
             "status": "done" if code == 0 else "error",

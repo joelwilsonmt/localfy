@@ -176,6 +176,26 @@ async def download_youtube(youtube_url: str, spotify_url: str, output_dir: str, 
     return await _run_async(["download", target, "--output", _output(output_dir)] + _NO_LYRICS, on_line=on_line)
 
 
+def write_m3u(target: dict, tracks: list[dict]) -> str | None:
+    """Write '<Name>.m3u8' inside the target's folder so external players
+    (Jellyfin, Navidrome, VLC) see a real playlist in Spotify order, not just a
+    folder of files. Entries are bare filenames (relative to the folder), which
+    keeps the playlist valid from both the host and the container.
+    """
+    folder = music_dir(target)
+    if not tracks or not os.path.isdir(folder):
+        return None
+    path = os.path.join(folder, _safe_name(target["name"]) + ".m3u8")
+    lines = ["#EXTM3U"]
+    for t in tracks:
+        label = f"{t['artist']} - {t['title']}" if t.get("artist") else (t.get("title") or t["filename"])
+        lines.append(f"#EXTINF:-1,{label}")
+        lines.append(t["filename"])
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return path
+
+
 def make_zip_file(target: dict) -> tuple[str | None, str | None]:
     """Write all of a target's tracks to a temp .zip on disk; return (name, path).
 
