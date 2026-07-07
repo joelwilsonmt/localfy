@@ -1,0 +1,12 @@
+{
+  "name": "Localfy",
+  "short_name": "Localfy",
+  "description": "Self-hosted Spotify playlist downloader and player",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#0d0d0d",
+  "theme_color": "#0d0d0d",
+  "icons": [
+    { "src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

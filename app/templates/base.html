@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Localfy{% endblock %}</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/style.css?v=6">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <meta name="theme-color" content="#0d0d0d">
+  <link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
 
@@ -173,6 +175,37 @@
     });
   }
 
+  // Lock-screen / hardware-key metadata & controls (phones, smart watches,
+  // keyboard media keys). No-op where the Media Session API is unavailable.
+  function _updateMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    const t = _tracks[_index];
+    if (!t) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: t.title || t.filename,
+        artist: t.artist || '',
+        artwork: _imageUrl ? [{ src: _imageUrl, sizes: '512x512' }] : [],
+      });
+    } catch (_) {}
+  }
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.setActionHandler('play', () => audio.play().catch(() => {}));
+      navigator.mediaSession.setActionHandler('pause', () => audio.pause());
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        if (audio.currentTime > 3) { audio.currentTime = 0; return; }
+        _move(-1);
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => _move(1));
+      navigator.mediaSession.setActionHandler('seekto', d => {
+        if (d.seekTime != null && isFinite(audio.duration)) audio.currentTime = d.seekTime;
+      });
+    } catch (_) {}
+    audio.addEventListener('play',  () => { navigator.mediaSession.playbackState = 'playing'; });
+    audio.addEventListener('pause', () => { navigator.mediaSession.playbackState = 'paused'; });
+  }
+
   function _loadTrack(index, autoplay) {
     if (index < 0 || index >= _tracks.length) return;
     _index = index;
@@ -187,6 +220,7 @@
     titleEl.textContent = t.title || t.filename;
     artistEl.textContent = t.artist || '';
     playerEl.style.display = '';
+    _updateMediaSession();
     _highlightRows();
     _save();
     if (autoplay !== false) audio.play().catch(() => {});
@@ -274,6 +308,7 @@
         audio.addEventListener('loadedmetadata', () => { audio.currentTime = s.time; }, { once: true });
       }
       playerEl.style.display = '';
+      _updateMediaSession();
     } catch (_) {}
   })();
 
