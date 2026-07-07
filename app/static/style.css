@@ -1021,3 +1021,32 @@ nav { position: sticky; top: 0; z-index: 150; }
 .failed-row-info { flex-direction: column; gap: .15rem; align-items: flex-start; }
 .failed-row-names { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
 .failed-reason { font-size: .72rem; color: var(--amber); }
+
+/* ── Activity page ─────────────────────────────────────────── */
+.activity-list { display: flex; flex-direction: column; }
+.activity-day {
+  font-size: .78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); margin: 1.2rem 0 .4rem;
+}
+.activity-day:first-child { margin-top: 0; }
+.activity-row {
+  display: flex; align-items: baseline; gap: .7rem;
+  padding: .45rem .6rem; border-radius: 6px; font-size: .85rem;
+}
+.activity-row:hover { background: var(--surface); }
+.activity-time { color: var(--muted); font-size: .78rem; min-width: 3.4em; font-variant-numeric: tabular-nums; }
+.activity-status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: var(--muted); align-self: center;
+}
+.activity-row.status-ok .activity-status-dot { background: var(--green); }
+.activity-row.status-error .activity-status-dot { background: var(--red); }
+.activity-row.status-interrupted .activity-status-dot { background: var(--amber); }
+.activity-body { min-width: 0; }
+.activity-target { color: var(--text); font-weight: 600; }
+.activity-status-text { color: var(--muted); margin-left: .35rem; }
+.activity-row.status-error .activity-status-text { color: var(--red); }
+.activity-message {
+  font-size: .75rem; color: var(--muted); margin-top: .15rem;
+  overflow-wrap: anywhere; white-space: pre-line;
+}

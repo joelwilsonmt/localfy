@@ -263,6 +263,17 @@ def target_detail(target_id: str, request: Request):
     })
 
 
+# ── Activity ──────────────────────────────────────────────────────────────────
+
+@app.get("/activity", response_class=HTMLResponse)
+def activity(request: Request):
+    if redir := _require_auth(request):
+        return redir
+    return templates.TemplateResponse(request, "activity.html", {
+        "logs": db.get_all_recent_logs(),
+    })
+
+
 # ── Stream audio ───────────────────────────────────────────────────────────────
 
 @app.get("/targets/{target_id}/local-tracks")

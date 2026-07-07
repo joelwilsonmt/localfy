@@ -219,6 +219,19 @@ def log_sync_finish(log_id: int, status: str, message: str):
         )
 
 
+def get_all_recent_logs(limit: int = 150) -> list[dict]:
+    """Latest sync logs across every target, newest first, with target names
+    for the activity page (targets since removed render as their raw id)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT l.*, t.name AS target_name, t.type AS target_type "
+            "FROM sync_logs l LEFT JOIN sync_targets t ON t.id = l.target_id "
+            "ORDER BY l.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_recent_logs(target_id: str, limit: int = 5) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
