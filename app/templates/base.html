@@ -5,13 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Localfy{% endblock %}</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
 
 {% block nav %}
 <nav>
   <a class="nav-logo" href="/dashboard">localfy</a>
+  <div class="nav-search-wrap">
+    <input type="search" id="global-search" class="nav-search" placeholder="Search your library…"
+           autocomplete="off" spellcheck="false" aria-label="Search downloaded tracks"
+           aria-expanded="false" aria-controls="global-search-results">
+    <div id="global-search-results" class="nav-search-results" role="listbox"
+         aria-label="Search results" hidden></div>
+  </div>
   <div class="nav-links">
     <a href="/dashboard">Library</a>
     <a href="/settings">Settings</a>
@@ -19,6 +26,9 @@
   </div>
 </nav>
 {% endblock %}
+
+<!-- Polite announcer for SPA route changes and toasts (screen readers) -->
+<div id="sr-announce" class="sr-only" role="status" aria-live="polite"></div>
 
 <!-- Player: lives outside #app-content so it's never destroyed by SPA navigation -->
 <div id="player" class="player" style="display:none">
@@ -31,25 +41,27 @@
   </div>
   <div class="player-center">
     <div class="player-controls">
-      <button class="ctrl-btn ctrl-toggle" id="btn-shuffle" title="Shuffle">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      <button class="ctrl-btn ctrl-toggle" id="btn-shuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="false">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
       </button>
-      <button class="ctrl-btn" id="btn-prev" title="Previous">⏮</button>
-      <button class="ctrl-btn ctrl-play" id="btn-play" title="Play/Pause">▶</button>
-      <button class="ctrl-btn" id="btn-next" title="Next">⏭</button>
-      <button class="ctrl-btn ctrl-toggle" id="btn-repeat" title="Repeat off"></button>
+      <button class="ctrl-btn" id="btn-prev" title="Previous" aria-label="Previous track">⏮</button>
+      <button class="ctrl-btn ctrl-play" id="btn-play" title="Play/Pause" aria-label="Play" aria-pressed="false">▶</button>
+      <button class="ctrl-btn" id="btn-next" title="Next" aria-label="Next track">⏭</button>
+      <button class="ctrl-btn ctrl-toggle" id="btn-repeat" title="Repeat off" aria-label="Repeat off" aria-pressed="false"></button>
     </div>
     <div class="player-scrubber">
       <span class="player-time" id="time-cur">0:00</span>
-      <input type="range" class="player-seek" id="seek" value="0" min="0" max="100" step="0.1">
+      <input type="range" class="player-seek" id="seek" value="0" min="0" max="100" step="0.1"
+             aria-label="Seek" aria-valuetext="0:00">
       <span class="player-time" id="time-dur">0:00</span>
     </div>
   </div>
   <div class="player-right">
-    <span class="vol-icon">
+    <span class="vol-icon" aria-hidden="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
     </span>
-    <input type="range" class="player-vol" id="vol" value="80" min="0" max="100">
+    <input type="range" class="player-vol" id="vol" value="80" min="0" max="100"
+           aria-label="Volume" aria-valuetext="80%">
   </div>
   <audio id="audio"></audio>
 </div>
@@ -118,9 +130,12 @@
   const _ICON_REPEAT_ONE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/><path d="M11 14v-4l-1 .6"/></svg>';
   function _updateModes() {
     btnShuffle.classList.toggle('active', _shuffle);
+    btnShuffle.setAttribute('aria-pressed', _shuffle ? 'true' : 'false');
     btnRepeat.classList.toggle('active', _repeat !== 0);
+    btnRepeat.setAttribute('aria-pressed', _repeat !== 0 ? 'true' : 'false');
     btnRepeat.innerHTML = _repeat === 2 ? _ICON_REPEAT_ONE : _ICON_REPEAT;
     btnRepeat.title = _repeat === 0 ? 'Repeat off' : _repeat === 1 ? 'Repeat all' : 'Repeat one';
+    btnRepeat.setAttribute('aria-label', btnRepeat.title);
     audio.loop = false;   // looping is handled manually so 'ended' still fires
   }
 
@@ -204,8 +219,8 @@
     _updateModes();
     _save();
   });
-  audio.addEventListener('play',  () => { btnPlay.textContent = '⏸'; });
-  audio.addEventListener('pause', () => { btnPlay.textContent = '▶'; });
+  audio.addEventListener('play',  () => { btnPlay.textContent = '⏸'; btnPlay.setAttribute('aria-pressed', 'true'); btnPlay.setAttribute('aria-label', 'Pause'); });
+  audio.addEventListener('pause', () => { btnPlay.textContent = '▶'; btnPlay.setAttribute('aria-pressed', 'false'); btnPlay.setAttribute('aria-label', 'Play'); });
 
   seekEl.addEventListener('mousedown', () => { _seeking = true; });
   seekEl.addEventListener('touchstart', () => { _seeking = true; }, { passive: true });
@@ -220,15 +235,23 @@
   seekEl.addEventListener('mouseup', _finishSeek);
   seekEl.addEventListener('touchend', _finishSeek);
 
+  let _lastSave = 0;
   audio.addEventListener('timeupdate', () => {
     if (_seeking || !isFinite(audio.duration) || !audio.duration) return;
     seekEl.value = (audio.currentTime / audio.duration) * 100;
     timeCur.textContent = fmt(audio.currentTime);
     timeDur.textContent = fmt(audio.duration);
-    if (Math.round(audio.currentTime) % 5 === 0) _save();
+    seekEl.setAttribute('aria-valuetext', fmt(audio.currentTime) + ' of ' + fmt(audio.duration));
+    // Persist at most every ~5s (timeupdate fires ~4×/s).
+    const now = Date.now();
+    if (now - _lastSave > 5000) { _lastSave = now; _save(); }
   });
   audio.addEventListener('loadedmetadata', () => { timeDur.textContent = fmt(audio.duration); });
-  volEl.addEventListener('input', () => { audio.volume = volEl.value / 100; _save(); });
+  volEl.addEventListener('input', () => {
+    audio.volume = volEl.value / 100;
+    volEl.setAttribute('aria-valuetext', volEl.value + '%');
+    _save();
+  });
 
   // Restore previous session
   (function _restore() {
@@ -240,13 +263,13 @@
       _tracks = s.tracks; _index = s.index; _targetId = s.targetId;
       _shuffle = !!s.shuffle; _repeat = s.repeat || 0;
       _buildOrder();
-      volEl.value = (s.volume || 0.8) * 100;
+      volEl.value = (s.volume ?? 0.8) * 100;   // ?? — a saved volume of 0 (muted) is valid
       const t = _tracks[_index];
       titleEl.textContent = t.title || t.filename;
       artistEl.textContent = t.artist || '';
       _setArt(s.imageUrl || null);
       audio.src = `/stream/${_targetId}/${encodeURIComponent(t.filename)}`;
-      audio.volume = s.volume || 0.8;
+      audio.volume = s.volume ?? 0.8;
       if (s.time > 0) {
         audio.addEventListener('loadedmetadata', () => { audio.currentTime = s.time; }, { once: true });
       }
@@ -264,35 +287,80 @@
       _buildOrder();
       _loadTrack(index);
     },
+    // Swap in a reordered/updated track list WITHOUT restarting playback —
+    // used when the detail page is re-sorted while a track is playing. Re-finds
+    // the current track by filename so the highlight and queue stay correct.
+    resync(tracks, currentFilename) {
+      const cur = currentFilename || (_tracks[_index] && _tracks[_index].filename);
+      _tracks = tracks;
+      _index = _tracks.findIndex(t => t.filename === cur);   // -1 if it left the list
+      _buildOrder();
+      _highlightRows();
+    },
     highlightRows: _highlightRows,
     isPlaying(targetId, index) {
       return _targetId === targetId && _index === index && !audio.paused;
     },
     get index()    { return _index; },
     get targetId() { return _targetId; },
+    get currentFilename() { return (_index >= 0 && _tracks[_index]) ? _tracks[_index].filename : null; },
+  };
+
+  // ── Cross-page sync tracker ───────────────────────────────
+  // Remembers targets whose sync was just triggered, so a page loaded right
+  // after (e.g. navigating home from a playlist) knows to show/poll progress
+  // even if it loads before the backend has registered the run as "running".
+  window.SYNC = {
+    mark(id) {
+      try {
+        const m = JSON.parse(sessionStorage.getItem('lfy_syncs') || '{}');
+        m[id] = Date.now();
+        sessionStorage.setItem('lfy_syncs', JSON.stringify(m));
+      } catch (_) {}
+    },
+    clear(id) {
+      try {
+        const m = JSON.parse(sessionStorage.getItem('lfy_syncs') || '{}');
+        delete m[id];
+        sessionStorage.setItem('lfy_syncs', JSON.stringify(m));
+      } catch (_) {}
+    },
+    recent() {
+      try {
+        const m = JSON.parse(sessionStorage.getItem('lfy_syncs') || '{}');
+        const cutoff = Date.now() - 30 * 60 * 1000;   // forget marks older than 30 min
+        return Object.keys(m).filter(id => m[id] > cutoff);
+      } catch (_) { return []; }
+    },
   };
 
   // ── SPA Navigation ────────────────────────────────────────
-  function _showSpinner() {
-    document.getElementById('app-content').innerHTML =
-      '<div class="page-loading"><div class="spinner"></div></div>';
+  // Pages register teardown callbacks (e.g. clearInterval) here; we run them
+  // before swapping content so polling loops from the old page don't leak and
+  // keep hammering /progress after their DOM is gone.
+  window.__pageCleanup = [];
+  function _runCleanup() {
+    const fns = window.__pageCleanup;
+    window.__pageCleanup = [];
+    fns.forEach(fn => { try { fn(); } catch (_) {} });
   }
 
-  // Scroll memory: remember where each page was scrolled so we can restore it
-  // on return. Exception: if you lingered on a detail page longer than this,
-  // returning to the library starts at the top instead of your old spot.
+  function _announce(msg) {
+    const el = document.getElementById('sr-announce');
+    if (el) el.textContent = msg;
+  }
+
+  function _showSpinner() {
+    document.getElementById('app-content').innerHTML =
+      '<div class="page-loading" role="status" aria-label="Loading"><div class="spinner"></div></div>';
+  }
+
+  // SPA navigation always lands at the top of the new page.
   history.scrollRestoration = 'manual';
-  const _scrollPos = {};
-  let _curPath = location.pathname;
-  let _enterTime = Date.now();
-  const _DETAIL_LINGER_MS = 90 * 1000;   // 1:30
 
   async function navigateTo(url, pushState) {
     const wantedPath = new URL(url, location.href).pathname;
-    // Snapshot the page we're leaving before we tear it down.
-    _scrollPos[_curPath] = window.scrollY;
-    const leavingDetail = _curPath.startsWith('/targets/');
-    const lingered = Date.now() - _enterTime;
+    _runCleanup();   // stop the outgoing page's polling loops
 
     if (pushState !== false) history.pushState({}, '', url);
     _showSpinner();
@@ -309,23 +377,20 @@
       document.getElementById('app-content').innerHTML = newBlock.innerHTML;
       document.title = doc.title;
 
-      // Decide where to land.
-      let y = 0;
-      if (wantedPath === '/dashboard' && leavingDetail && lingered > _DETAIL_LINGER_MS) {
-        y = 0;                                  // lingered on a playlist → back to top
-      } else if (_scrollPos[wantedPath] != null) {
-        y = _scrollPos[wantedPath];             // restore previous position
-      }
-      window.scrollTo(0, y);
-      requestAnimationFrame(() => window.scrollTo(0, y));   // re-apply once layout settles
-      _curPath = wantedPath;
-      _enterTime = Date.now();
+      // Always land at the top of the new page.
+      window.scrollTo(0, 0);
+      requestAnimationFrame(() => window.scrollTo(0, 0));   // re-apply once layout settles
 
       document.getElementById('app-content').querySelectorAll('script').forEach(old => {
         const s = document.createElement('script');
         s.textContent = old.textContent;
         old.replaceWith(s);
       });
+
+      // Move focus to the new page's heading and announce it for screen readers.
+      const heading = document.getElementById('app-content').querySelector('h1, h2');
+      if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus({ preventScroll: true }); }
+      _announce(doc.title.replace(/ — Localfy$/, ''));
 
       window.PLAYER.highlightRows();
     } catch (_) {
@@ -358,14 +423,68 @@
   document.addEventListener('keydown', e => {
     if (e.code !== 'Space') return;
     const active = document.activeElement;
-    // Only let space do its normal thing inside actual text-entry fields;
-    // everywhere else (incl. focused range sliders / buttons) it toggles playback.
-    if (active && (active.tagName === 'TEXTAREA' || active.isContentEditable ||
-        (active.tagName === 'INPUT' && _TEXT_INPUT_TYPES.has(active.type)))) return;
+    // Let space behave normally when focus is on any interactive element — text
+    // fields, buttons, links, selects, sliders, and our focusable track rows —
+    // so it activates them / scrolls rather than hijacking to play/pause.
+    if (active && (
+        active.tagName === 'TEXTAREA' || active.tagName === 'BUTTON' ||
+        active.tagName === 'A' || active.tagName === 'SELECT' || active.tagName === 'INPUT' ||
+        active.isContentEditable || active.getAttribute('role') === 'button')) return;
     if (_index === -1) return;
     e.preventDefault();
     audio.paused ? audio.play().catch(() => {}) : audio.pause();
   });
+
+  // ── Sync-complete notifications ───────────────────────────
+  window.notify = function (title, body) {
+    try {
+      if (!('Notification' in window) || Notification.permission === 'denied') return;
+      if (Notification.permission === 'granted') { new Notification(title, { body }); return; }
+      Notification.requestPermission().then(p => { if (p === 'granted') new Notification(title, { body }); });
+    } catch (_) {}
+  };
+
+  // ── Global library search ─────────────────────────────────
+  (function () {
+    const input = document.getElementById('global-search');
+    const box = document.getElementById('global-search-results');
+    if (!input || !box) return;
+    let timer = null, results = [];
+    const esc = s => { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; };
+
+    function close() { box.hidden = true; box.innerHTML = ''; input.setAttribute('aria-expanded', 'false'); }
+    function render(rs) {
+      results = rs;
+      box.innerHTML = rs.length
+        ? rs.map((r, i) => `<button class="nav-search-item" role="option" data-i="${i}">
+            <span class="nsi-title">${esc(r.title)}</span>
+            <span class="nsi-meta">${esc(r.artist)} · ${esc(r.target_name)}</span></button>`).join('')
+        : '<div class="nav-search-empty">No matches in your downloads</div>';
+      box.hidden = false;
+      input.setAttribute('aria-expanded', 'true');
+    }
+
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const q = input.value.trim();
+      if (q.length < 2) { close(); return; }
+      timer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+          if (r.ok) render((await r.json()).results || []);
+        } catch (_) {}
+      }, 250);
+    });
+    box.addEventListener('click', e => {
+      const btn = e.target.closest('.nav-search-item');
+      if (!btn) return;
+      const r = results[+btn.dataset.i];
+      if (r) window.PLAYER.load([{ filename: r.filename, title: r.title, artist: r.artist }], 0, r.target_id, null);
+      close(); input.value = '';
+    });
+    input.addEventListener('keydown', e => { if (e.key === 'Escape') { close(); input.blur(); } });
+    document.addEventListener('click', e => { if (!e.target.closest('.nav-search-wrap')) close(); });
+  })();
 })();
 </script>
 

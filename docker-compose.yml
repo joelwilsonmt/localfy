@@ -8,7 +8,7 @@ services:
       # Default binds all interfaces. For Tailscale (or any reverse proxy on the
       # same host), set BIND_ADDR=127.0.0.1 in .env so nothing is reachable except
       # via the proxy.
-      - "${BIND_ADDR:-0.0.0.0}:8080:8080"
+      - "${BIND_ADDR:-0.0.0.0}:${HOST_PORT:-8080}:8080"
     volumes:
       - ${MUSIC_HOST_PATH:-./music}:/music
       - ${DATA_HOST_PATH:-./data}:/data

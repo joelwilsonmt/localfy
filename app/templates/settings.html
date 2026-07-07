@@ -29,6 +29,19 @@
         Lossless formats (flac, wav) produce much larger files with no quality benefit.
       </div>
     </div>
+    <div class="field">
+      <label>Audio Bitrate</label>
+      <select id="sel-bitrate">
+        {% for br, lbl in [("auto", "auto (match source, no re-encode)"), ("128k", "128k"), ("256k", "256k"), ("320k", "320k")] %}
+        <option value="{{ br }}" {% if audio_bitrate == br %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+      <div class="field-hint">
+        <strong style="color:var(--text)">auto</strong> keeps the original YouTube stream's bitrate
+        (no transcode — best quality/speed). A fixed bitrate re-encodes to that target; since the
+        source is already ~128–160 kbps, higher values just grow the file without adding quality.
+      </div>
+    </div>
     <button class="btn-save" id="btn-save-audio" onclick="saveAudio()">Save</button>
     <span id="audio-saved" style="font-size:.8rem; color:var(--green); margin-left:.75rem; opacity:0; transition:opacity .3s">Saved</span>
   </div>
@@ -80,24 +93,50 @@
 <script>
 async function saveAudio() {
   const fmt = document.getElementById('sel-format').value;
-  await fetch('/settings/audio-format', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `audio_format=${fmt}`,
-  });
+  const bitrate = document.getElementById('sel-bitrate').value;
   const saved = document.getElementById('audio-saved');
+  try {
+    const [rf, rb] = await Promise.all([
+      fetch('/settings/audio-format', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `audio_format=${fmt}`,
+      }),
+      fetch('/settings/audio-bitrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `audio_bitrate=${bitrate}`,
+      }),
+    ]);
+    if (!rf.ok || !rb.ok) throw new Error();
+    saved.textContent = 'Saved'; saved.style.color = 'var(--green)';
+  } catch (_) {
+    saved.textContent = "Couldn't save"; saved.style.color = 'var(--red)';
+  }
   saved.style.opacity = '1';
-  setTimeout(() => { saved.style.opacity = '0'; }, 2000);
+  setTimeout(() => { saved.style.opacity = '0'; }, 2500);
 }
 
 async function updateSyncDelete(enabled) {
+  const checkbox = document.getElementById('chk-sync-delete');
   const text = document.getElementById('sync-delete-text');
-  await fetch('/settings/sync-delete-removed', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'enabled=' + (enabled ? 'true' : 'false'),
-  });
-  if (text) text.textContent = enabled ? 'On' : 'Off';
+  // Deleting local files is destructive — confirm before turning it on.
+  if (enabled && !confirm('Enable deleting local files when a track is removed from a Spotify playlist?\n\nThis permanently deletes audio files on the next sync.')) {
+    checkbox.checked = false;
+    return;
+  }
+  try {
+    const res = await fetch('/settings/sync-delete-removed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'enabled=' + (enabled ? 'true' : 'false'),
+    });
+    if (!res.ok) throw new Error();
+    if (text) text.textContent = enabled ? 'On' : 'Off';
+  } catch (_) {
+    checkbox.checked = !enabled;   // revert
+    if (text) text.textContent = checkbox.checked ? 'On' : 'Off';
+  }
 }
 </script>
 {% endblock %}

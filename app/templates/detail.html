@@ -21,12 +21,9 @@
       <h1 class="detail-title">{{ target.name }}</h1>
       <div class="detail-counts">
         <span>{{ total_count }} tracks</span>
-        {% if downloaded_count > 0 %}
-        <span class="dot">·</span>
-        <span class="downloaded-count {% if downloaded_count == total_count %}count-full{% else %}count-partial{% endif %}">
-          {{ downloaded_count }} downloaded
-        </span>
-        {% endif %}
+        <span class="dot" id="dl-count-dot" {% if downloaded_count == 0 %}hidden{% endif %}>·</span>
+        <span class="downloaded-count {% if total_count > 0 and downloaded_count == total_count %}count-full{% else %}count-partial{% endif %}"
+              id="detail-dl-count" {% if downloaded_count == 0 %}hidden{% endif %}>{{ downloaded_count }} downloaded</span>
         {% if target.last_synced %}
         <span class="dot">·</span>
         <span>Last synced {{ target.last_synced[:10] }}</span>
@@ -40,6 +37,7 @@
         </div>
         <span class="sync-progress-text" id="detail-progress-text">{{ downloaded_count }} of {{ total_count }} downloaded</span>
       </div>
+      <div class="sync-current" id="detail-progress-current"></div>
       {% endif %}
       <div style="margin-top:.75rem; display:flex; align-items:center; gap:.75rem; flex-wrap:wrap;">
         {% if downloaded_count < total_count or spotify_error %}
@@ -69,14 +67,16 @@
 
   {% if tracks %}
   <div class="track-list-header">
-    <span class="tl-num">#</span>
-    <span class="tl-title">Title</span>
-    <span class="tl-artist">Artist</span>
+    <button type="button" class="tl-num tl-sort" data-sort="num" aria-sort="ascending" title="Sort by track number">#</button>
+    <button type="button" class="tl-title tl-sort" data-sort="title" aria-sort="none" title="Sort by title">Title</button>
+    <button type="button" class="tl-artist tl-sort" data-sort="artist" aria-sort="none" title="Sort by artist">Artist</button>
     <span class="tl-action"></span>
   </div>
   <div class="track-list" id="track-list" data-target-id="{{ target.id }}">
     {% for track in tracks %}
+    {% set actionable = track.downloaded or track.id %}
     <div class="track-row {% if not track.downloaded %}not-downloaded{% endif %}"
+         {% if actionable %}tabindex="0" role="button" aria-label="{% if track.downloaded %}Play{% else %}Download{% endif %} {{ track.name }}{% if track.artist %} by {{ track.artist }}{% endif %}"{% endif %}
          data-index="{{ loop.index0 }}"
          data-downloaded="{{ 'true' if track.downloaded else 'false' }}"
          data-track-id="{{ track.id or '' }}"
@@ -89,9 +89,9 @@
       <span class="track-artist">{{ track.artist }}</span>
       <div class="track-action">
         {% if not track.downloaded and track.id %}
-        <button class="btn-track-dl" data-track-id="{{ track.id }}" title="Download track">⬇</button>
+        <button class="btn-track-dl" data-track-id="{{ track.id }}" title="Download track" aria-label="Download {{ track.name }}">⬇</button>
         {% elif track.downloaded %}
-        <span class="track-dl-done" title="Downloaded">✓</span>
+        <span class="track-dl-done" title="Downloaded" aria-hidden="true">✓</span>
         {% endif %}
       </div>
     </div>
@@ -100,6 +100,35 @@
   {% else %}
   <div class="empty-state">
     <p>No tracks found.</p>
+  </div>
+  {% endif %}
+
+  {% if failed %}
+  <div class="failed-section">
+    <div class="failed-head">
+      <h2>⚠ {{ failed | length }} track{{ 's' if failed|length != 1 else '' }} couldn't be downloaded</h2>
+      <button class="btn-retry-failed" id="retry-failed">↻ Retry all</button>
+    </div>
+    <p class="failed-hint">Usually these weren't matched on YouTube. <strong>Retry all</strong> re-searches each one, or paste the right YouTube link next to a track to grab that exact video.</p>
+    <div class="failed-status" id="failed-status" role="status" aria-live="polite" hidden></div>
+    <ul class="failed-list">
+      {% for f in failed %}
+      <li class="failed-row" data-track-id="{{ f.spotify_id }}">
+        <div class="failed-row-info">
+          <div class="failed-row-names">
+            <span class="failed-title">{{ f.name }}</span>
+            <span class="failed-artist">{{ f.artist }}</span>
+          </div>
+          {% if f.error %}<span class="failed-reason">{{ f.error }}</span>{% endif %}
+        </div>
+        <form class="yt-form" data-track-id="{{ f.spotify_id }}">
+          <input type="url" class="yt-input" placeholder="Paste YouTube link…"
+                 aria-label="YouTube link for {{ f.name }}" autocomplete="off" spellcheck="false">
+          <button type="submit" class="btn-yt">Fetch</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
   </div>
   {% endif %}
 </div>
@@ -111,10 +140,19 @@
 (function () {
   const TARGET_ID = {{ target.id | tojson }};
   const IMAGE_URL = {{ (target.image_url or '') | tojson }};
+  const NAME = {{ target.name | tojson }};
+  const ALREADY_ENABLED = {{ 'true' if target.enabled else 'false' }};
+
+  // Timers cleared on SPA navigation so polls don't leak.
+  const _timers = new Set();
+  const _track = id => { _timers.add(id); return id; };
+  window.__pageCleanup = window.__pageCleanup || [];
+  window.__pageCleanup.push(() => { _timers.forEach(t => { clearInterval(t); clearTimeout(t); }); _timers.clear(); });
+
+  const trackList = document.getElementById('track-list');
 
   function buildTrackList() {
-    const rows = document.querySelectorAll('#track-list .track-row');
-    return Array.from(rows)
+    return Array.from(trackList.querySelectorAll('.track-row'))
       .filter(r => r.dataset.downloaded === 'true')
       .map(r => ({
         filename: r.dataset.filename,
@@ -123,20 +161,85 @@
       }));
   }
 
+  const _norm = s => (s || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+
+  // Recompute the "N downloaded" header count from the current rows.
+  function updateDownloadedCount() {
+    const rows = trackList.querySelectorAll('.track-row');
+    const n = trackList.querySelectorAll('.track-row[data-downloaded="true"]').length;
+    const span = document.getElementById('detail-dl-count');
+    const dot = document.getElementById('dl-count-dot');
+    if (!span) return;
+    if (n > 0) {
+      span.textContent = n + ' downloaded';
+      span.classList.toggle('count-full', n === rows.length);
+      span.classList.toggle('count-partial', n !== rows.length);
+      span.hidden = false;
+      if (dot) dot.hidden = false;
+    } else {
+      span.hidden = true;
+      if (dot) dot.hidden = true;
+    }
+  }
+
+  // Flip a row to its downloaded/playable state in place (used during a live sync).
+  function markRowDownloaded(row, filename) {
+    row.classList.remove('not-downloaded');
+    row.dataset.downloaded = 'true';
+    row.dataset.filename = filename;
+    const title = row.querySelector('.track-title')?.textContent.trim() || '';
+    const artist = row.querySelector('.track-artist')?.textContent.trim() || '';
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    row.setAttribute('aria-label', 'Play ' + title + (artist ? ' by ' + artist : ''));
+    const numCell = row.querySelector('.track-num-cell');
+    if (numCell && !numCell.querySelector('.track-play-icon')) {
+      const ic = document.createElement('span');
+      ic.className = 'track-play-icon'; ic.setAttribute('aria-hidden', 'true'); ic.textContent = '▶';
+      numCell.appendChild(ic);
+    }
+    const action = row.querySelector('.track-action');
+    if (action) action.innerHTML = '<span class="track-dl-done" title="Downloaded" aria-hidden="true">✓</span>';
+  }
+
+  // Poll the filesystem (no Spotify call) and turn freshly-downloaded tracks
+  // playable as they land, without a full page reload.
+  let _scanCount = -1;
+  async function refreshDownloadedRows() {
+    try {
+      const d = await fetch(`/targets/${TARGET_ID}/scan`).then(r => r.json());
+      const files = d.tracks || [];
+      if (files.length === _scanCount) return;   // nothing new since last check
+      _scanCount = files.length;
+      const idx = {};
+      files.forEach(t => { idx[_norm(t.artist + ' ' + t.title)] = t.filename; });
+      let changed = false;
+      trackList.querySelectorAll('.track-row.not-downloaded').forEach(row => {
+        const title = row.querySelector('.track-title')?.textContent.trim() || '';
+        const artist = row.querySelector('.track-artist')?.textContent.trim() || '';
+        const fn = idx[_norm(artist + ' ' + title)];
+        if (fn) { markRowDownloaded(row, fn); changed = true; }
+      });
+      if (changed) {
+        updateDownloadedCount();
+        if (window.PLAYER.targetId === TARGET_ID && window.PLAYER.index !== -1) {
+          window.PLAYER.resync(buildTrackList(), window.PLAYER.currentFilename);
+        } else {
+          window.PLAYER.highlightRows();
+        }
+      }
+    } catch (_) {}
+  }
+
   window.PLAYER.highlightRows();
 
-  // ── Track row clicks (downloaded tracks → play) ───────────
-  document.getElementById('track-list').addEventListener('click', e => {
-    const row = e.target.closest('.track-row');
+  // ── Activate a track row (play if downloaded, else download) ──
+  function activateRow(row) {
     if (!row) return;
-
     if (row.dataset.downloaded === 'true') {
-      // Find its index within downloaded tracks only
-      const allRows = Array.from(document.querySelectorAll('#track-list .track-row'));
-      const dlRows = allRows.filter(r => r.dataset.downloaded === 'true');
+      const dlRows = Array.from(trackList.querySelectorAll('.track-row')).filter(r => r.dataset.downloaded === 'true');
       const dlIndex = dlRows.indexOf(row);
       if (dlIndex === -1) return;
-
       if (window.PLAYER.isPlaying(TARGET_ID, dlIndex)) {
         document.getElementById('audio').pause();
       } else {
@@ -144,57 +247,229 @@
       }
       return;
     }
-
-    // Not downloaded: trigger download on row click (same as button)
     const btn = row.querySelector('.btn-track-dl');
     if (btn && !btn.disabled) btn.click();
+  }
+  trackList.addEventListener('click', e => {
+    if (e.target.closest('.btn-track-dl')) return;   // button handles itself
+    activateRow(e.target.closest('.track-row'));
+  });
+  trackList.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const row = e.target.closest('.track-row');
+    if (!row || !row.hasAttribute('role')) return;
+    e.preventDefault();
+    activateRow(row);
   });
 
-  // ── Sync & Download button ────────────────────────────────
+  // ── Sorting (track # / title / artist; click again to reverse) ──
+  const SORT_KEY = 'lfy_sort_' + TARGET_ID;
+  function _cmp(a, b, key) {
+    if (key === 'num') return (+a.dataset.index) - (+b.dataset.index);
+    const sel = key === 'title' ? '.track-title' : '.track-artist';
+    const av = (a.querySelector(sel)?.textContent || '').toLowerCase().trim();
+    const bv = (b.querySelector(sel)?.textContent || '').toLowerCase().trim();
+    return av.localeCompare(bv);
+  }
+  function applySort(key, dir, persist) {
+    const playingFile = window.PLAYER.currentFilename;
+    Array.from(trackList.querySelectorAll('.track-row'))
+      .sort((a, b) => _cmp(a, b, key) * dir)
+      .forEach(r => trackList.appendChild(r));
+    document.querySelectorAll('.tl-sort').forEach(h => {
+      const on = h.dataset.sort === key;
+      h.setAttribute('aria-sort', on ? (dir === 1 ? 'ascending' : 'descending') : 'none');
+      h.classList.toggle('sorted-asc', on && dir === 1);
+      h.classList.toggle('sorted-desc', on && dir === -1);
+    });
+    // Keep the player's queue aligned with the visible order without restarting.
+    if (window.PLAYER.targetId === TARGET_ID && window.PLAYER.index !== -1) {
+      window.PLAYER.resync(buildTrackList(), playingFile);
+    } else {
+      window.PLAYER.highlightRows();
+    }
+    if (persist) { try { sessionStorage.setItem(SORT_KEY, JSON.stringify({ key, dir })); } catch (_) {} }
+  }
+  document.querySelectorAll('.tl-sort').forEach(h => {
+    h.addEventListener('click', () => {
+      let cur = {}; try { cur = JSON.parse(sessionStorage.getItem(SORT_KEY) || '{}'); } catch (_) {}
+      const key = h.dataset.sort;
+      const dir = (cur.key === key && cur.dir === 1) ? -1 : 1;
+      applySort(key, dir, true);
+    });
+  });
+  // Re-apply a persisted sort after each (re-)render (server order is track #).
+  (function () {
+    let s = null; try { s = JSON.parse(sessionStorage.getItem(SORT_KEY) || 'null'); } catch (_) {}
+    if (s && s.key && !(s.key === 'num' && s.dir === 1)) applySort(s.key, s.dir, false);
+  })();
+
+  // ── Sync & Download ───────────────────────────────────────
   const syncBtn = document.getElementById('detail-sync-btn');
-  if (syncBtn) {
-    syncBtn.addEventListener('click', async () => {
-      syncBtn.disabled = true;
-      syncBtn.textContent = '↻ Starting…';
-      const fill = document.getElementById('detail-progress-fill');
-      const text = document.getElementById('detail-progress-text');
+  const retryBtn = document.getElementById('retry-failed');
+  const fill = document.getElementById('detail-progress-fill');
+  const text = document.getElementById('detail-progress-text');
+  const current = document.getElementById('detail-progress-current');
+  let _polling = false;
 
-      const alreadyEnabled = {{ 'true' if target.enabled else 'false' }};
-      if (!alreadyEnabled) {
-        await fetch(`/targets/${TARGET_ID}/toggle`, { method: 'POST' });
-      }
-      await fetch(`/targets/${TARGET_ID}/sync`, { method: 'POST' });
+  function pollSync() {
+    if (_polling) return;
+    _polling = true;
+    if (syncBtn) { syncBtn.disabled = true; syncBtn.textContent = '↻ Syncing…'; }
+    let idleStreak = 0, tick = 0;
+    refreshDownloadedRows();   // reflect whatever's already on disk right away
 
-      const poll = setInterval(async () => {
-        try {
-          const res = await fetch(`/targets/${TARGET_ID}/progress`);
-          const p = await res.json();
-          if (p.status === 'running') {
-            const done = (p.downloaded || 0) + (p.skipped || 0);
-            const total = p.total || 0;
-            if (fill) fill.style.width = total > 0 ? Math.min(100, Math.round(done / total * 100)) + '%' : '30%';
-            const parts = [];
-            if (p.downloaded > 0) parts.push(`${p.downloaded} downloaded`);
-            if (p.skipped > 0) parts.push(`${p.skipped} skipped`);
-            if (total > 0) parts.push(`of ${total}`);
-            if (text) text.textContent = parts.join(' · ') || 'Working…';
-            syncBtn.textContent = '↻ Syncing…';
-          } else if (p.status === 'done') {
-            clearInterval(poll);
-            window.navigateTo(location.pathname, false);
-          } else if (p.status === 'error') {
-            clearInterval(poll);
-            const msg = p.message ? String(p.message).replace(/\s+/g, ' ').trim().slice(-160) : 'Sync failed.';
-            if (text) { text.textContent = 'Error: ' + msg; text.style.color = 'var(--red)'; }
-            syncBtn.disabled = false;
-            syncBtn.textContent = '↻ Retry';
+    const poll = _track(setInterval(async () => {
+      try {
+        const res = await fetch(`/targets/${TARGET_ID}/progress`);
+        const p = await res.json();
+        if (p.status === 'running') {
+          idleStreak = 0;
+          if ((++tick) % 2 === 0) refreshDownloadedRows();   // ~every 3s, flip new rows playable
+          const done = (p.downloaded || 0) + (p.skipped || 0);
+          const total = p.total || 0;
+          if (fill) fill.style.width = total > 0 ? Math.min(100, Math.round(done / total * 100)) + '%' : '30%';
+          const parts = [];
+          if (p.downloaded > 0) parts.push(`${p.downloaded} downloaded`);
+          if (p.skipped > 0) parts.push(`${p.skipped} skipped`);
+          if (total > 0) parts.push(`of ${total}`);
+          if (text) text.textContent = parts.join(' · ') || 'Working…';
+          if (current) current.textContent = p.current ? `↓ ${p.current}` : 'Searching for tracks…';
+          if (syncBtn) syncBtn.textContent = '↻ Syncing…';
+        } else if (p.status === 'done') {
+          clearInterval(poll); _polling = false;
+          if (current) current.textContent = '';
+          if (window.SYNC) window.SYNC.clear(TARGET_ID);
+          if (window.notify && p.downloaded > 0) window.notify(NAME + ' synced', p.downloaded + ' new track(s) downloaded');
+          window.navigateTo(location.pathname, false);   // re-render with fresh state
+        } else if (p.status === 'error') {
+          clearInterval(poll); _polling = false;
+          if (window.SYNC) window.SYNC.clear(TARGET_ID);
+          const msg = p.message ? String(p.message).replace(/\s+/g, ' ').trim().slice(-160) : 'Sync failed.';
+          if (text) { text.textContent = 'Error: ' + msg; text.style.color = 'var(--red)'; }
+          if (current) current.textContent = '';
+          if (syncBtn) { syncBtn.disabled = false; syncBtn.textContent = '↻ Retry'; }
+        } else {
+          // Idle: the sync never registered (or already ended). Give it a few
+          // cycles, then recover the button instead of leaving it stuck.
+          if (++idleStreak >= 5) {
+            clearInterval(poll); _polling = false;
+            if (syncBtn) { syncBtn.disabled = false; syncBtn.textContent = '↻ Retry'; }
           }
-        } catch (_) {}
-      }, 1500);
+        }
+      } catch (_) {}
+    }, 1500));
 
-      setTimeout(() => { clearInterval(poll); window.navigateTo(location.pathname, false); }, 600000);
+    _track(setTimeout(() => {
+      clearInterval(poll); _polling = false;
+      if (syncBtn && syncBtn.disabled) { syncBtn.disabled = false; syncBtn.textContent = '↻ Retry'; }
+    }, 600000));
+  }
+
+  async function startSync() {
+    if (syncBtn) { syncBtn.disabled = true; syncBtn.textContent = '↻ Starting…'; }
+    if (window.SYNC) window.SYNC.mark(TARGET_ID);
+    try {
+      if (!ALREADY_ENABLED) await fetch(`/targets/${TARGET_ID}/toggle`, { method: 'POST' });
+      const res = await fetch(`/targets/${TARGET_ID}/sync`, { method: 'POST' });
+      if (!res.ok) throw new Error();
+      pollSync();
+    } catch (_) {
+      if (window.SYNC) window.SYNC.clear(TARGET_ID);
+      if (syncBtn) { syncBtn.disabled = false; syncBtn.textContent = '↻ Retry'; }
+      if (text) { text.textContent = "Couldn't start sync. Try again."; text.style.color = 'var(--red)'; }
+    }
+  }
+  if (syncBtn) syncBtn.addEventListener('click', startSync);
+
+  // ── Retry failed tracks (one at a time, with live "Searching for…" status) ──
+  const failedStatus = document.getElementById('failed-status');
+  function showFailedStatus(msg) { if (failedStatus) { failedStatus.textContent = msg || ''; failedStatus.hidden = !msg; } }
+
+  let _retryPolling = false;
+  function pollRetry() {
+    if (_retryPolling) return;
+    _retryPolling = true;
+    if (retryBtn) { retryBtn.disabled = true; retryBtn.textContent = '↻ Retrying…'; }
+    const poll = _track(setInterval(async () => {
+      try {
+        const p = await fetch(`/targets/${TARGET_ID}/progress`).then(r => r.json());
+        if (p.status === 'running' && p.mode === 'retry') {
+          if (p.current) {
+            const n = (p.done || 0) + 1, t = p.total || '?';
+            showFailedStatus(`🔍 Searching for ${p.current} … (${n}/${t})`);
+          } else if (p.result) {
+            showFailedStatus(p.result);
+          }
+        } else if (p.status === 'done' || p.status === 'error') {
+          clearInterval(poll); _retryPolling = false;
+          const got = p.downloaded || 0;
+          showFailedStatus(got ? `Recovered ${got} track${got !== 1 ? 's' : ''}. Refreshing…`
+                               : (p.result || 'No new matches found. Refreshing…'));
+          setTimeout(() => window.navigateTo(location.pathname, false), 1500);
+        }
+      } catch (_) {}
+    }, 1500));
+    _track(setTimeout(() => { clearInterval(poll); _retryPolling = false; }, 600000));
+  }
+
+  if (retryBtn) {
+    retryBtn.addEventListener('click', async () => {
+      retryBtn.disabled = true; retryBtn.textContent = '↻ Retrying…';
+      showFailedStatus('Starting retry…');
+      try {
+        const res = await fetch(`/targets/${TARGET_ID}/retry-failed`, { method: 'POST' });
+        if (!res.ok) throw new Error();
+        pollRetry();
+      } catch (_) {
+        showFailedStatus("Couldn't start retry.");
+        retryBtn.disabled = false; retryBtn.textContent = '↻ Retry all';
+      }
     });
   }
+
+  // ── Per-track "paste a YouTube link" ──────────────────────
+  document.querySelectorAll('.yt-form').forEach(form => {
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const trackId = form.dataset.trackId;
+      const input = form.querySelector('.yt-input');
+      const btn = form.querySelector('.btn-yt');
+      const url = input.value.trim();
+      if (!url) return;
+      btn.disabled = true; input.disabled = true; btn.textContent = 'Fetching…';
+      try {
+        const res = await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/youtube`, {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'url=' + encodeURIComponent(url),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(d.error || 'Could not start download.');
+      } catch (err) {
+        btn.disabled = false; input.disabled = false; btn.textContent = 'Fetch';
+        showFailedStatus(String(err.message));
+        return;
+      }
+      const poll = _track(setInterval(async () => {
+        try {
+          const r = await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/status`).then(x => x.json());
+          if (r.status === 'done') { clearInterval(poll); window.navigateTo(location.pathname, false); }
+          else if (r.status === 'error') {
+            clearInterval(poll);
+            btn.disabled = false; input.disabled = false; btn.textContent = 'Fetch';
+            showFailedStatus(r.message ? `Couldn't fetch: ${r.message}` : "That link didn't download — try a different video.");
+          }
+        } catch (_) {}
+      }, 2000));
+      _track(setTimeout(() => clearInterval(poll), 180000));
+    });
+  });
+
+  // Resume the right indicator if work for this target is already running.
+  fetch(`/targets/${TARGET_ID}/progress`)
+    .then(r => r.json())
+    .then(p => { if (p.status === 'running') { (p.mode === 'retry') ? pollRetry() : pollSync(); } })
+    .catch(() => {});
 
   // ── Per-track download buttons ────────────────────────────
   document.querySelectorAll('.btn-track-dl').forEach(btn => {
@@ -202,29 +477,26 @@
       e.stopPropagation();
       const trackId = btn.dataset.trackId;
       if (!trackId) return;
-      btn.textContent = '⟳';
-      btn.disabled = true;
-      btn.classList.add('downloading');
-
-      await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/download`, { method: 'POST' });
-
-      const poll = setInterval(async () => {
+      btn.textContent = '⟳'; btn.disabled = true; btn.classList.add('downloading');
+      try {
+        const res = await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/download`, { method: 'POST' });
+        if (!res.ok) throw new Error();
+      } catch (_) {
+        btn.textContent = '⬇'; btn.disabled = false; btn.classList.remove('downloading');
+        return;
+      }
+      const poll = _track(setInterval(async () => {
         try {
           const res = await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/status`);
           const { status } = await res.json();
-          if (status === 'done') {
+          if (status === 'done') { clearInterval(poll); window.navigateTo(location.pathname, false); }
+          else if (status === 'error') {
             clearInterval(poll);
-            window.navigateTo(location.pathname, false);
-          } else if (status === 'error') {
-            clearInterval(poll);
-            btn.textContent = '⬇';
-            btn.disabled = false;
-            btn.classList.remove('downloading');
+            btn.textContent = '⬇'; btn.disabled = false; btn.classList.remove('downloading');
           }
         } catch (_) {}
-      }, 2000);
-
-      setTimeout(() => clearInterval(poll), 180000);
+      }, 2000));
+      _track(setTimeout(() => clearInterval(poll), 180000));
     });
   });
 })();

@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install spotdl in its own isolated environment so it can't conflict with our app
-RUN pip install pipx && pipx install 'spotdl>=4.0.0'
+RUN pip install pipx && pipx install 'spotdl==4.5.0'
 ENV PATH="/root/.local/bin:$PATH"
 
 WORKDIR /app

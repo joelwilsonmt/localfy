@@ -7,6 +7,21 @@
   <div class="error-banner">{{ error }}</div>
   {% endif %}
 
+  <div class="dash-header">
+    <div class="lib-stats">
+      <span title="Downloaded tracks across all playlists"><strong>{{ stats.total_tracks }}</strong> tracks</span>
+      <span id="lib-disk" class="muted-stat"></span>
+      <span title="Playlists &amp; albums set to sync automatically"><strong>{{ stats.enabled_targets }}</strong> auto-syncing</span>
+      {% if stats.failed_tracks %}<span class="stat-failed" title="Tracks that couldn't be downloaded — open a playlist marked ⚠ to retry">⚠ {{ stats.failed_tracks }} failed</span>{% endif %}
+      <span id="lib-queue" class="stat-queue" hidden></span>
+    </div>
+    <form class="add-url-form" id="add-url-form">
+      <input type="url" id="add-url-input" class="add-url-input" autocomplete="off"
+             placeholder="Add a Spotify playlist/album URL…" aria-label="Add a playlist or album by Spotify URL">
+      <button type="submit" class="btn-add-url">+ Add</button>
+    </form>
+  </div>
+
   <div class="dash-search-wrap">
     <span class="dash-search-icon" aria-hidden="true">⌕</span>
     <input type="search" id="dash-search" class="dash-search"
@@ -31,6 +46,7 @@
     {% set schedule = target.get("schedule", "daily") %}
     {% set last_synced = target.get("last_synced") %}
     {% set local = local_counts.get(item.id, 0) %}
+    {% set is_syncing = item.id in syncing %}
     {% set is_partial = local > 0 and item.track_count and local < item.track_count %}
     <div class="item-card {% if enabled %}enabled{% endif %} {% if is_partial %}partial{% endif %}" id="card-{{ item.id }}">
 
@@ -61,9 +77,11 @@
             —
           {% endif %}
           {% if item.type == "playlist" %}&nbsp;· playlist{% elif item.type == "album" %}&nbsp;· album{% endif %}
+          {% set fc = failed_counts.get(item.id, 0) %}
+          {% if fc %}&nbsp;· <a class="failed-badge" href="/targets/{{ item.id }}" title="{{ fc }} tracks couldn't be downloaded">⚠ {{ fc }}</a>{% endif %}
         </div>
         {% set total = item.track_count or 0 %}
-        {% set show_bar = total > 0 and (enabled or local > 0) %}
+        {% set show_bar = (total > 0 and (enabled or local > 0)) or is_syncing %}
         {% set pct = (100 * local // total) if total > 0 else 0 %}
         <div class="sync-progress-wrap" id="progress-wrap-{{ item.id }}"
              data-local="{{ local }}" data-total="{{ total }}"
@@ -92,8 +110,9 @@
            class="btn-zip" title="Download all as ZIP">⬇ ZIP</a>
         {% endif %}
 
-        <button class="btn-sync" data-id="{{ item.id }}" title="Sync now">
-          ↻ Sync
+        <button class="btn-sync {% if is_syncing %}syncing{% endif %}" data-id="{{ item.id }}"
+                title="Sync now" {% if is_syncing %}disabled{% endif %}>
+          ↻ {% if is_syncing %}Syncing…{% else %}Sync{% endif %}
         </button>
 
         <label class="track-label" title="{% if enabled %}Stop tracking (keeps downloaded files){% else %}Start tracking{% endif %}">
@@ -116,19 +135,38 @@
   </div>
   {% endif %}
   {% endfor %}
+
+  {% if not error and not playlists and not albums %}
+  <div class="empty-state">
+    <p>No playlists or albums yet.</p>
+    <p class="muted-text">Follow playlists on Spotify, or paste a link in the box above to start downloading.</p>
+  </div>
+  {% endif %}
 </div>
 
-<div id="toast-container" class="toast-container"></div>
+<div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Timers registered here are cleared when the SPA navigates away (no leaked polls).
+const _timers = new Set();
+const _track = id => { _timers.add(id); return id; };
+window.__pageCleanup = window.__pageCleanup || [];
+window.__pageCleanup.push(() => { _timers.forEach(t => { clearInterval(t); clearTimeout(t); }); _timers.clear(); });
+
 async function updateSchedule(id, schedule) {
-  await fetch('/targets/' + id + '/schedule', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'schedule=' + schedule,
-  });
+  try {
+    const res = await fetch('/targets/' + id + '/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'schedule=' + schedule,
+    });
+    if (!res.ok) throw new Error();
+    showToast('Schedule updated.', 'success');
+  } catch (_) {
+    showToast("Couldn't update schedule.", 'error');
+  }
 }
 
 function showToast(message, type = 'success') {
@@ -185,7 +223,9 @@ function _updateProgressUI(id, p) {
   if (p.downloaded > 0) parts.push(`${p.downloaded} downloaded`);
   if (p.skipped > 0) parts.push(`${p.skipped} already had`);
   if (total > 0) parts.push(`of ${total}`);
-  if (text) text.textContent = parts.join(' · ') || 'Preparing…';
+  let label = parts.join(' · ') || 'Preparing…';
+  if (p.current) label += ` — ↓ ${p.current}`;
+  if (text) text.textContent = label;
 }
 
 // Settle the bar into its resting "x of y downloaded" state from the wrap's
@@ -209,6 +249,7 @@ function _restingProgress(id) {
 function startPolling(id, triggerSync) {
   if (_activePolls.has(id)) return;
   _activePolls.add(id);
+  let sawRunning = false;
 
   const btn = document.querySelector(`.btn-sync[data-id="${id}"]`);
   const wrap = document.getElementById('progress-wrap-' + id);
@@ -222,16 +263,18 @@ function startPolling(id, triggerSync) {
     : Promise.resolve();
 
   kickoff.then(() => {
-    const interval = setInterval(async () => {
+    const interval = _track(setInterval(async () => {
       try {
         const res = await fetch('/targets/' + id + '/progress');
         const p = await res.json();
 
         if (p.status === 'running') {
+          sawRunning = true;
           _updateProgressUI(id, p);
         } else if (p.status === 'done' || p.status === 'error') {
           clearInterval(interval);
           _activePolls.delete(id);
+          if (window.SYNC) window.SYNC.clear(id);
           if (btn) { btn.classList.remove('syncing'); btn.textContent = '↻ Sync'; btn.disabled = false; }
 
           // Update the resting download count from the final tallies, then
@@ -243,21 +286,34 @@ function startPolling(id, triggerSync) {
           if (fill) fill.classList.remove('indeterminate');
           _restingProgress(id);
 
-          const el = document.getElementById('synced-' + id);
-          if (el) el.textContent = new Date().toISOString().slice(0, 10);
-
+          // Server only updates last_synced on success — mirror that here.
           if (p.status === 'done') {
-            const parts = [];
-            if (p.downloaded > 0) parts.push(`${p.downloaded} new track${p.downloaded !== 1 ? 's' : ''} downloaded`);
-            if (p.skipped > 0) parts.push(`${p.skipped} already up to date`);
-            showToast(parts.length ? parts.join(', ') + '.' : 'Sync complete.', 'success');
-          } else {
-            showToast('Sync failed. Check logs for details.', 'error');
+            const el = document.getElementById('synced-' + id);
+            if (el) el.textContent = new Date().toISOString().slice(0, 10);
+          }
+
+          // Only announce completion if we actually observed this run in
+          // progress (or kicked it off here) — a resumed poll that lands on a
+          // long-finished sync shouldn't pop a stale toast.
+          if (sawRunning || triggerSync) {
+            const name = document.querySelector(`#card-${id} .item-name`)?.textContent || 'Playlist';
+            if (p.status === 'done') {
+              const parts = [];
+              if (p.downloaded > 0) parts.push(`${p.downloaded} new track${p.downloaded !== 1 ? 's' : ''} downloaded`);
+              if (p.skipped > 0) parts.push(`${p.skipped} already up to date`);
+              const msg = parts.length ? parts.join(', ') + '.' : 'Sync complete.';
+              showToast(`${name}: ${msg}`, 'success');
+              if (p.downloaded > 0 && window.notify) window.notify(`${name} synced`, msg);
+            } else {
+              showToast(`${name}: sync failed. Check logs.`, 'error');
+            }
           }
         } else {
-          // status is idle — sync may have completed before we polled
-          if (triggerSync) {
-            // we just triggered it; it may not have started yet, keep waiting briefly
+          // status is idle — keep waiting if we just triggered this (here or on
+          // another page), since it may not have registered as running yet;
+          // otherwise the sync genuinely isn't active, so stop.
+          if (triggerSync || (window.SYNC && window.SYNC.recent().includes(id))) {
+            // keep waiting
           } else {
             clearInterval(interval);
             _activePolls.delete(id);
@@ -266,24 +322,37 @@ function startPolling(id, triggerSync) {
           }
         }
       } catch (_) {}
-    }, 1500);
+    }, 1500));
 
-    setTimeout(() => {
+    _track(setTimeout(() => {
       clearInterval(interval);
       _activePolls.delete(id);
+      if (window.SYNC) window.SYNC.clear(id);
       if (btn) { btn.classList.remove('syncing'); btn.textContent = '↻ Sync'; btn.disabled = false; }
       _restingProgress(id);
-    }, 600000);
+    }, 600000));
   }).catch(() => { _activePolls.delete(id); });
 }
 
 document.querySelectorAll('.btn-sync').forEach(btn => {
-  btn.addEventListener('click', () => startPolling(btn.dataset.id, true));
+  btn.addEventListener('click', () => {
+    if (window.SYNC) window.SYNC.mark(btn.dataset.id);
+    startPolling(btn.dataset.id, true);
+  });
 });
 
-// Auto-detect any syncs already running (e.g. triggered from detail page)
+// Resume the progress indicator for any sync already running OR just triggered
+// from another page (e.g. a playlist's "Sync & Download"). The recent-mark check
+// covers the race where this page loads before the sync registers as running.
+const _recentSyncs = window.SYNC ? window.SYNC.recent() : [];
 document.querySelectorAll('.item-card[id^="card-"]').forEach(card => {
   const id = card.id.replace('card-', '');
+  // Server already marked this card syncing, or we triggered it from another
+  // page — resume the live indicator without waiting on a status fetch.
+  if (card.querySelector('.btn-sync.syncing') || _recentSyncs.includes(id)) {
+    startPolling(id, false);
+    return;
+  }
   fetch('/targets/' + id + '/progress')
     .then(r => r.json())
     .then(p => { if (p.status === 'running') startPolling(id, false); })
@@ -354,5 +423,55 @@ document.querySelectorAll('.art-play-btn').forEach(btn => {
     }
   });
 });
+
+// ── Add a target by Spotify URL ──────────────────────────────
+(function () {
+  const form = document.getElementById('add-url-form');
+  if (!form) return;
+  const input = document.getElementById('add-url-input');
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const url = input.value.trim();
+    if (!url) return;
+    const btn = form.querySelector('button');
+    btn.disabled = true; btn.textContent = 'Adding…';
+    try {
+      const res = await fetch('/targets/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'url=' + encodeURIComponent(url),
+      });
+      const d = await res.json();
+      if (res.ok && d.ok) {
+        input.value = '';
+        showToast(`Added "${d.name}". Syncing will begin shortly.`, 'success');
+        setTimeout(() => window.navigateTo('/dashboard', false), 800);
+      } else {
+        showToast(d.error || 'Could not add that URL.', 'error');
+      }
+    } catch (_) {
+      showToast('Could not add that URL.', 'error');
+    } finally {
+      btn.disabled = false; btn.textContent = '+ Add';
+    }
+  });
+})();
+
+// ── Live library stats (disk usage) + active-sync queue count ─
+fetch('/api/stats').then(r => r.json()).then(s => {
+  const el = document.getElementById('lib-disk');
+  if (el && s.disk_bytes) {
+    const gb = s.disk_bytes / 1e9;
+    el.textContent = (gb >= 1 ? gb.toFixed(1) + ' GB' : (s.disk_bytes / 1e6).toFixed(0) + ' MB');
+    el.title = 'Total size of downloaded audio on disk';
+  }
+}).catch(() => {});
+fetch('/api/queue').then(r => r.json()).then(d => {
+  const el = document.getElementById('lib-queue');
+  if (el && d.active && d.active.length) {
+    el.textContent = `${d.active.length} syncing now`;
+    el.hidden = false;
+  }
+}).catch(() => {});
 </script>
 {% endblock %}
