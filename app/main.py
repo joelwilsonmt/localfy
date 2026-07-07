@@ -68,6 +68,10 @@ def _spotify_tracks_for(target: dict) -> list[dict]:
         return spotify.get_playlist_tracks(tid)
     elif target["type"] == "album":
         return spotify.get_album_tracks(tid)
+    elif target["type"] == "singles":
+        # One-off downloads have no Spotify-side collection; callers fall back
+        # to the local file list.
+        raise LookupError("singles have no Spotify track list")
     raw = spotify.get_liked_track_ids()  # liked_songs
     return [{"id": t, "name": name, "artist": artist,
              "spotify_url": f"https://open.spotify.com/track/{t}", "duration_ms": 0}
@@ -240,14 +244,18 @@ def target_detail(target_id: str, request: Request):
     from app.downloader import scan_tracks
     local_tracks = scan_tracks(target)
 
-    try:
-        spotify_tracks = _spotify_tracks_for(target)
-    except Exception as exc:
-        logger.exception("Failed to fetch Spotify tracks for %s", target_id)
-        spotify_tracks = None
-        spotify_error = str(exc)
+    if target["type"] == "singles":
+        # Local-only collection by design — not an error, just no Spotify side.
+        spotify_tracks, spotify_error = None, None
     else:
-        spotify_error = None
+        try:
+            spotify_tracks = _spotify_tracks_for(target)
+        except Exception as exc:
+            logger.exception("Failed to fetch Spotify tracks for %s", target_id)
+            spotify_tracks = None
+            spotify_error = str(exc)
+        else:
+            spotify_error = None
 
     if spotify_tracks is not None:
         tracks = _merge_tracks(spotify_tracks, local_tracks)
@@ -549,6 +557,60 @@ async def youtube_download_route(target_id: str, track_id: str, request: Request
                 prog.set_track(track_id, "error", reason)
         except Exception:
             logger.exception("YouTube download failed for %s", track_id)
+            prog.set_track(track_id, "error", "Download failed")
+
+    asyncio.create_task(_do())
+    return JSONResponse({"status": "started"})
+
+
+# ── One-off single downloads (nav search) ─────────────────────────────────────
+
+@app.get("/api/spotify-search")
+def api_spotify_search(request: Request, q: str = ""):
+    if redir := _require_auth(request):
+        return redir
+    q = (q or "").strip()
+    if len(q) < 2:
+        return JSONResponse({"results": []})
+    from app import spotify
+    try:
+        return JSONResponse({"results": spotify.search_tracks(q)})
+    except Exception:
+        logger.exception("Spotify search failed")
+        return JSONResponse({"results": []})
+
+
+@app.post("/api/singles/download")
+async def download_single(request: Request, track_id: str = Form(...)):
+    """Download one arbitrary track (not part of any synced target) into
+    /music/Singles, backed by a 'singles' pseudo-target so the file is
+    searchable, streamable, and listed at /targets/singles."""
+    if redir := _require_auth(request):
+        return redir
+    from app import spotify
+    try:
+        song = spotify.get_track_song_meta(track_id)
+    except Exception as e:
+        return JSONResponse({"error": f"Couldn't load that track: {e}"}, status_code=400)
+    db.upsert_target(id="singles", type="singles", name="Singles",
+                     spotify_url=None, image_url=None)
+    target = db.get_target("singles")
+
+    async def _do():
+        from app import progress as prog
+        from app.downloader import download_from_meta, music_dir, classify_failure
+        prog.set_track(track_id, "running")
+        try:
+            out_dir = music_dir(target)
+            code, output = await download_from_meta([song], out_dir)
+            if sched.track_on_disk(out_dir, song):
+                db.mark_downloaded(track_id, song["name"], song["artist"], "singles")
+                prog.set_track(track_id, "done")
+            else:
+                reason = classify_failure(output) if code != 0 else "Download finished but no file appeared"
+                prog.set_track(track_id, "error", reason)
+        except Exception:
+            logger.exception("Single download failed for %s", track_id)
             prog.set_track(track_id, "error", "Download failed")
 
     asyncio.create_task(_do())

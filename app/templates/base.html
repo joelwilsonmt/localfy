@@ -485,17 +485,28 @@
     const input = document.getElementById('global-search');
     const box = document.getElementById('global-search-results');
     if (!input || !box) return;
-    let timer = null, results = [];
+    let timer = null, results = [], spResults = [];
     const esc = s => { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; };
 
     function close() { box.hidden = true; box.innerHTML = ''; input.setAttribute('aria-expanded', 'false'); }
-    function render(rs) {
-      results = rs;
-      box.innerHTML = rs.length
-        ? rs.map((r, i) => `<button class="nav-search-item" role="option" data-i="${i}">
+    function render() {
+      const parts = [];
+      parts.push(results.length
+        ? results.map((r, i) => `<button class="nav-search-item" role="option" data-i="${i}">
             <span class="nsi-title">${esc(r.title)}</span>
             <span class="nsi-meta">${esc(r.artist)} · ${esc(r.target_name)}</span></button>`).join('')
-        : '<div class="nav-search-empty">No matches in your downloads</div>';
+        : '<div class="nav-search-empty">No matches in your downloads</div>');
+      if (spResults.length) {
+        parts.push('<div class="nav-search-divider">From Spotify — download to Singles</div>');
+        parts.push(spResults.map((r, i) => `<div class="nav-search-item nsi-sp" role="option">
+            <div class="nsi-sp-text">
+              <span class="nsi-title">${esc(r.name)}</span>
+              <span class="nsi-meta">${esc(r.artist)}${r.album ? ' · ' + esc(r.album) : ''}</span>
+            </div>
+            <button class="nsi-dl" data-track-id="${esc(r.id)}" title="Download to Singles"
+                    aria-label="Download ${esc(r.name)} to Singles">⬇</button></div>`).join(''));
+      }
+      box.innerHTML = parts.join('');
       box.hidden = false;
       input.setAttribute('aria-expanded', 'true');
     }
@@ -505,15 +516,54 @@
       const q = input.value.trim();
       if (q.length < 2) { close(); return; }
       timer = setTimeout(async () => {
-        try {
-          const r = await fetch('/api/search?q=' + encodeURIComponent(q));
-          if (r.ok) render((await r.json()).results || []);
-        } catch (_) {}
+        // Local downloads and a Spotify track search in parallel; either may fail
+        // independently. Drop the response if the query has changed since.
+        const [lr, sr] = await Promise.allSettled([
+          fetch('/api/search?q=' + encodeURIComponent(q)).then(r => r.json()),
+          fetch('/api/spotify-search?q=' + encodeURIComponent(q)).then(r => r.json()),
+        ]);
+        if (input.value.trim() !== q) return;
+        results = lr.status === 'fulfilled' ? (lr.value.results || []) : [];
+        spResults = sr.status === 'fulfilled' ? (sr.value.results || []) : [];
+        render();
       }, 250);
     });
-    box.addEventListener('click', e => {
+
+    function pollSingle(id, btn) {
+      const t = setInterval(async () => {
+        try {
+          const r = await fetch(`/targets/singles/tracks/${id}/status`).then(x => x.json());
+          if (r.status === 'done') {
+            clearInterval(t);
+            btn.textContent = '✓'; btn.classList.add('done'); btn.title = 'Downloaded to Singles';
+          } else if (r.status === 'error') {
+            clearInterval(t);
+            btn.disabled = false; btn.textContent = '✗';
+            btn.title = r.message || 'Download failed — try again';
+          }
+        } catch (_) {}
+      }, 2000);
+      setTimeout(() => clearInterval(t), 180000);
+    }
+
+    box.addEventListener('click', async e => {
+      const dl = e.target.closest('.nsi-dl');
+      if (dl) {
+        e.stopPropagation();
+        const id = dl.dataset.trackId;
+        dl.disabled = true; dl.textContent = '⟳';
+        try {
+          const res = await fetch('/api/singles/download', {
+            method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'track_id=' + encodeURIComponent(id),
+          });
+          if (!res.ok) throw new Error();
+          pollSingle(id, dl);
+        } catch (_) { dl.disabled = false; dl.textContent = '✗'; dl.title = 'Could not start download'; }
+        return;
+      }
       const btn = e.target.closest('.nav-search-item');
-      if (!btn) return;
+      if (!btn || btn.classList.contains('nsi-sp')) return;
       const r = results[+btn.dataset.i];
       if (r) window.PLAYER.load([{ filename: r.filename, title: r.title, artist: r.artist }], 0, r.target_id, null);
       close(); input.value = '';

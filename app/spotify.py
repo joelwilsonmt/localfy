@@ -207,6 +207,29 @@ def get_album_song_meta(album_id: str) -> list[dict]:
     return out
 
 
+def search_tracks(query: str, limit: int = 8) -> list[dict]:
+    """Spotify track search for the nav bar's 'download a single' results."""
+    sp = get_client()
+    res = sp.search(q=query, type="track", limit=limit)
+    out = []
+    for t in (res.get("tracks") or {}).get("items") or []:
+        if not t or not t.get("id"):
+            continue
+        out.append({
+            "id": t["id"],
+            "name": t["name"],
+            "artist": ", ".join(a["name"] for a in t.get("artists", [])),
+            "album": (t.get("album") or {}).get("name", ""),
+        })
+    return out
+
+
+def get_track_song_meta(track_id: str) -> dict:
+    """One track as a spotdl Song dict (for one-off single downloads)."""
+    sp = get_client()
+    return _song_dict(sp.track(track_id))
+
+
 def get_liked_song_meta() -> list[dict]:
     """All liked songs as spotdl Song dicts."""
     sp = get_client()

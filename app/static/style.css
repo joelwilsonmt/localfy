@@ -1050,3 +1050,20 @@ nav { position: sticky; top: 0; z-index: 150; }
   font-size: .75rem; color: var(--muted); margin-top: .15rem;
   overflow-wrap: anywhere; white-space: pre-line;
 }
+
+/* ── Spotify results in the nav search (download to Singles) ─ */
+.nav-search-divider {
+  font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); padding: .55rem .6rem .25rem; border-top: 1px solid var(--border);
+  margin-top: .3rem;
+}
+.nsi-sp { flex-direction: row; align-items: center; gap: .6rem; cursor: default; }
+.nsi-sp-text { display: flex; flex-direction: column; gap: .1rem; min-width: 0; flex: 1; }
+.nsi-dl {
+  flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+  cursor: pointer; font-size: .8rem; -webkit-appearance: none; appearance: none;
+}
+.nsi-dl:hover { border-color: var(--green); color: var(--green); }
+.nsi-dl:disabled { cursor: default; }
+.nsi-dl.done { border-color: var(--green); color: var(--green); }

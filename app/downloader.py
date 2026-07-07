@@ -236,6 +236,8 @@ def music_dir(target: dict) -> str:
         return os.path.join(DOWNLOAD_PATH, "Liked Songs")
     elif target["type"] == "album":
         return os.path.join(DOWNLOAD_PATH, "Albums", _safe_name(target["name"]))
+    elif target["type"] == "singles":
+        return os.path.join(DOWNLOAD_PATH, "Singles")
     else:
         return os.path.join(DOWNLOAD_PATH, _safe_name(target["name"]))
 
