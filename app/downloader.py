@@ -19,6 +19,8 @@ AUDIO_BITRATE = os.environ.get("AUDIO_BITRATE", "320k")
 
 _ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus"}
+
 # Explicit output template (matches spotdl's default). Pinned here because
 # scan_tracks() parses "Artist - Title.ext" filenames to match local files
 # against Spotify tracks; a future change to spotdl's default would break that.
@@ -223,12 +225,83 @@ def dir_size(path: str = None) -> int:
     total = 0
     for dirpath, _dirs, files in os.walk(root):
         for f in files:
-            if os.path.splitext(f)[1].lower() in {".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus"}:
+            if os.path.splitext(f)[1].lower() in AUDIO_EXTS:
                 try:
                     total += os.path.getsize(os.path.join(dirpath, f))
                 except OSError:
                     pass
     return total
+
+
+def _duplicate_groups() -> list[tuple[int, list[tuple[str, int]]]]:
+    """Audio files stored more than once: groups of identical (filename, size)
+    across folders, as (size, [(path, inode)]). Inode-aware, so copies that are
+    already hardlinked together don't count as waste."""
+    groups: dict[tuple[str, int], list[tuple[str, int]]] = {}
+    for dirpath, _dirs, files in os.walk(DOWNLOAD_PATH):
+        for f in files:
+            if os.path.splitext(f)[1].lower() not in AUDIO_EXTS:
+                continue
+            p = os.path.join(dirpath, f)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            groups.setdefault((f, st.st_size), []).append((p, st.st_ino))
+    out = []
+    for (_fname, size), entries in sorted(groups.items()):
+        if len(entries) > 1 and len({ino for _, ino in entries}) > 1:
+            out.append((size, entries))
+    return out
+
+
+def storage_report() -> dict:
+    """Library size plus how much space duplicate downloads are wasting (the
+    same track downloaded into several playlist folders)."""
+    dup_files, wasted, top = 0, 0, []
+    for size, entries in _duplicate_groups():
+        extra = len({ino for _, ino in entries}) - 1
+        dup_files += extra
+        wasted += size * extra
+        top.append({
+            "filename": os.path.basename(entries[0][0]),
+            "size": size,
+            "copies": len(entries),
+            "folders": sorted({os.path.relpath(os.path.dirname(p), DOWNLOAD_PATH) or "."
+                               for p, _ in entries}),
+        })
+    top.sort(key=lambda g: -(g["size"] * (g["copies"] - 1)))
+    return {"total_bytes": dir_size(), "dup_files": dup_files,
+            "wasted_bytes": wasted, "group_count": len(top), "top": top[:8]}
+
+
+def dedupe_hardlinks() -> dict:
+    """Replace duplicate copies with hardlinks to one canonical file.
+
+    Every playlist folder keeps its entry, but identical audio is stored once.
+    Links via a temp name + os.replace so a failure (e.g. copies on different
+    filesystems) leaves the original file untouched.
+    """
+    linked, saved, failed = 0, 0, 0
+    for size, entries in _duplicate_groups():
+        canonical, can_ino = entries[0]
+        for p, ino in entries[1:]:
+            if ino == can_ino:
+                continue
+            tmp = p + ".lfy-dedupe-tmp"
+            try:
+                os.link(canonical, tmp)
+                os.replace(tmp, p)
+                linked += 1
+                saved += size
+            except OSError:
+                failed += 1
+                logger.warning("Couldn't hardlink %s -> %s", p, canonical)
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+    return {"linked": linked, "saved_bytes": saved, "failed": failed}
 
 
 def music_dir(target: dict) -> str:
@@ -247,10 +320,9 @@ def scan_tracks(target: dict) -> list[dict]:
     folder = music_dir(target)
     if not os.path.isdir(folder):
         return []
-    exts = {".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus"}
     tracks = []
     for fname in sorted(os.listdir(folder)):
-        if os.path.splitext(fname)[1].lower() in exts:
+        if os.path.splitext(fname)[1].lower() in AUDIO_EXTS:
             stem = os.path.splitext(fname)[0]
             if " - " in stem:
                 artist, title = stem.split(" - ", 1)

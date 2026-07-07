@@ -1067,3 +1067,14 @@ nav { position: sticky; top: 0; z-index: 150; }
 .nsi-dl:hover { border-color: var(--green); color: var(--green); }
 .nsi-dl:disabled { cursor: default; }
 .nsi-dl.done { border-color: var(--green); color: var(--green); }
+
+/* ── Settings: storage report ──────────────────────────────── */
+.storage-summary { font-size: .88rem; margin-bottom: .6rem; }
+.storage-dupes {
+  list-style: none; display: flex; flex-direction: column; gap: .25rem;
+  margin: 0 0 .9rem; font-size: .8rem;
+}
+.storage-dupes li { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
+.sd-name { color: var(--text); }
+.sd-meta { color: var(--muted); font-size: .72rem; }
+.sd-more { color: var(--muted); font-size: .72rem; }

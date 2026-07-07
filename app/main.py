@@ -714,6 +714,23 @@ def update_audio_format(request: Request, audio_format: str = Form(...)):
     return JSONResponse({"ok": True})
 
 
+@app.get("/api/storage-report")
+def api_storage_report(request: Request):
+    # sync def → FastAPI's threadpool, so the os.walk doesn't block the loop
+    if redir := _require_auth(request):
+        return redir
+    from app.downloader import storage_report
+    return JSONResponse(storage_report())
+
+
+@app.post("/settings/dedupe")
+def run_dedupe(request: Request):
+    if redir := _require_auth(request):
+        return redir
+    from app.downloader import dedupe_hardlinks
+    return JSONResponse(dedupe_hardlinks())
+
+
 @app.post("/settings/audio-bitrate")
 def update_audio_bitrate(request: Request, audio_bitrate: str = Form(...)):
     if redir := _require_auth(request):

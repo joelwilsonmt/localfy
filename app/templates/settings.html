@@ -68,6 +68,21 @@
   </div>
 
   <div class="settings-card">
+    <h3>Storage</h3>
+    <div class="storage-summary" id="storage-summary">Scanning library…</div>
+    <ul class="storage-dupes" id="storage-dupes" hidden></ul>
+    <button class="btn-save" id="btn-dedupe" onclick="runDedupe()" hidden>Free up space (hardlink duplicates)</button>
+    <span id="dedupe-result" style="font-size:.8rem; color:var(--green); margin-left:.75rem;"></span>
+    <div class="field-hint" style="margin-top:.75rem">
+      The same track downloaded into several playlist folders is stored once per folder.
+      Deduplicating replaces the extra copies with
+      <strong style="color:var(--text)">hardlinks</strong> — every folder keeps its file,
+      but the audio is stored on disk only once. Requires the music folders to live on one
+      filesystem (true for the default Docker volume).
+    </div>
+  </div>
+
+  <div class="settings-card">
     <h3>Spotify Account</h3>
     <p style="font-size:.9rem; margin-bottom:1rem; color: var(--muted);">
       Your Spotify account is connected. Disconnecting will remove the stored token
@@ -115,6 +130,60 @@ async function saveAudio() {
   }
   saved.style.opacity = '1';
   setTimeout(() => { saved.style.opacity = '0'; }, 2500);
+}
+
+// ── Storage report + hardlink dedupe ─────────────────────────
+function fmtBytes(b) {
+  if (!b) return '0 MB';
+  return b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : (b / 1e6).toFixed(0) + ' MB';
+}
+
+async function loadStorage() {
+  const summary = document.getElementById('storage-summary');
+  const list = document.getElementById('storage-dupes');
+  const btn = document.getElementById('btn-dedupe');
+  try {
+    const s = await fetch('/api/storage-report').then(r => r.json());
+    let text = `${fmtBytes(s.total_bytes)} of audio on disk.`;
+    if (s.dup_files > 0) {
+      text += ` ${s.dup_files} duplicate file${s.dup_files !== 1 ? 's' : ''} across playlists, wasting ${fmtBytes(s.wasted_bytes)}.`;
+      list.innerHTML = s.top.map(g =>
+        `<li><span class="sd-name"></span><span class="sd-meta">×${g.copies} · ${fmtBytes(g.size)} each · ${g.folders.join(', ')}</span></li>`
+      ).join('');
+      // Filenames/folders are untrusted text — set via textContent, not HTML.
+      list.querySelectorAll('.sd-name').forEach((el, i) => { el.textContent = s.top[i].filename; });
+      if (s.group_count > s.top.length) {
+        list.insertAdjacentHTML('beforeend', `<li class="sd-more">…and ${s.group_count - s.top.length} more</li>`);
+      }
+      list.hidden = false;
+      btn.hidden = false;
+    } else {
+      text += ' No duplicates found.';
+      list.hidden = true;
+      btn.hidden = true;
+    }
+    summary.textContent = text;
+  } catch (_) {
+    summary.textContent = "Couldn't scan the library.";
+  }
+}
+loadStorage();
+
+async function runDedupe() {
+  if (!confirm('Replace duplicate files with hardlinks?\n\nEvery playlist folder keeps its file — identical audio will just be stored once. This can\'t be undone per-file (but files can always be re-downloaded).')) return;
+  const btn = document.getElementById('btn-dedupe');
+  const result = document.getElementById('dedupe-result');
+  btn.disabled = true; btn.textContent = 'Deduplicating…';
+  try {
+    const r = await fetch('/settings/dedupe', { method: 'POST' }).then(x => x.json());
+    result.style.color = 'var(--green)';
+    result.textContent = `Freed ${fmtBytes(r.saved_bytes)} (${r.linked} file${r.linked !== 1 ? 's' : ''} linked${r.failed ? ', ' + r.failed + ' failed' : ''}).`;
+    loadStorage();
+  } catch (_) {
+    result.style.color = 'var(--red)';
+    result.textContent = "Couldn't deduplicate.";
+  }
+  btn.disabled = false; btn.textContent = 'Free up space (hardlink duplicates)';
 }
 
 async function updateSyncDelete(enabled) {
