@@ -23,6 +23,10 @@ services:
       - DATA_PATH=${DATA_PATH:-/data}
       - AUDIO_FORMAT=${AUDIO_FORMAT:-mp3}
       - AUDIO_BITRATE=${AUDIO_BITRATE:-320k}
+      # Run as this host user/group so downloaded files aren't owned by root.
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - LOCALFY_DISABLE_SCHEDULER=${LOCALFY_DISABLE_SCHEDULER:-}
     restart: unless-stopped
 
   caddy:

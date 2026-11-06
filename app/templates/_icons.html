@@ -1,0 +1,22 @@
+{#- One icon set (Lucide geometry, 2px stroke) instead of emoji / Unicode glyphs,
+    which render differently per platform (iOS turns ▶ ⏸ ⏮ ⏭ into emoji). -#}
+{%- macro icon(name, cls="icon") -%}
+{%- set filled = name in ("play", "pause", "skip-back", "skip-forward") -%}
+<svg class="{{ cls }}" aria-hidden="true" focusable="false" viewBox="0 0 24 24"
+     {%- if filled %} fill="currentColor" stroke="none"{% else %} fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"{% endif %}>
+{%- if name == "play" -%}<path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5Z"/>
+{%- elif name == "pause" -%}<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>
+{%- elif name == "skip-back" -%}<path d="M18 5.5v13a1 1 0 0 1-1.55.83L7 13v5.5a1 1 0 0 1-2 0v-13a1 1 0 0 1 2 0V11l9.45-6.33A1 1 0 0 1 18 5.5Z"/>
+{%- elif name == "skip-forward" -%}<path d="M6 5.5v13a1 1 0 0 0 1.55.83L17 13v5.5a1 1 0 0 0 2 0v-13a1 1 0 0 0-2 0V11L7.55 4.67A1 1 0 0 0 6 5.5Z"/>
+{%- elif name == "heart" -%}<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
+{%- elif name == "disc" -%}<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="2"/>
+{%- elif name == "search" -%}<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+{%- elif name == "chevron" -%}<path d="m9 18 6-6-6-6"/>
+{%- else -%}<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+{%- endif -%}
+</svg>
+{%- endmacro -%}
+
+{%- macro art_placeholder(type, cls) -%}
+<div class="{{ cls }}">{{ icon("heart" if type == "liked_songs" else "disc" if type == "album" else "music") }}</div>
+{%- endmacro -%}

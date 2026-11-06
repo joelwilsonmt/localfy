@@ -1,142 +1,163 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon, art_placeholder %}
 {% block title %}Library — Localfy{% endblock %}
+
+{#- One card. `full` cards (synced section) carry the sync controls; library
+    cards only offer to start auto-syncing. -#}
+{% macro card(item, full) %}
+{% set local = local_counts.get(item.id, 0) %}
+{% set enabled = item.enabled %}
+{% set is_syncing = item.id in syncing %}
+{% set total = item.track_count or 0 %}
+{% set is_partial = local > 0 and total > 0 and local < total %}
+{% set fc = failed_counts.get(item.id, 0) %}
+{% set kind = "Playlist" if item.type == "playlist" else "Album" if item.type == "album" else "Your liked songs" %}
+<div class="item-card{% if enabled %} enabled{% endif %}{% if is_partial %} partial{% endif %}{% if not full %} item-card-slim{% endif %}"
+     id="card-{{ item.id }}" data-failed="{{ fc }}">
+  <div class="item-art-wrap"
+       {% if local > 0 %}data-target-id="{{ item.id }}" data-image="{{ item.image_url or '' }}"{% endif %}>
+    {% if item.image_url %}
+    <img class="item-art" src="{{ item.image_url }}" alt="" loading="lazy">
+    {% else %}
+    {{ art_placeholder(item.type, "item-art-placeholder") }}
+    {% endif %}
+    {% if local > 0 %}
+    <button class="art-play-btn" aria-label="Play {{ item.name }}">{{ icon("play") }}</button>
+    {% endif %}
+  </div>
+
+  <div class="item-info">
+    <a class="item-name" href="/targets/{{ item.id }}">{{ item.name }}</a>
+    {% set show_bar = full and ((total > 0 and (enabled or local > 0)) or is_syncing) %}
+    <div class="item-meta">
+      <span>{{ kind }}</span>
+      {% if not show_bar %}<span>{{ "{:,}".format(total) }} track{{ "" if total == 1 else "s" }}</span>{% endif %}
+      {% if full %}
+      {% set st = sync_status[item.id] %}
+      <span class="sync-when{% if st.overdue %} overdue{% endif %}" id="synced-{{ item.id }}"
+            title="{{ st.title }}{% if st.overdue %}. Scheduled syncs only run while localfy is running; Sync catches it up now.{% endif %}">{{ st.text }}</span>
+      {% endif %}
+      {% if fc %}<a class="failed-badge" href="/targets/{{ item.id }}#failed">⚠︎ {{ fc }} failed</a>{% endif %}
+    </div>
+    {% if full %}
+    {% set pct = (100 * local // total) if total > 0 else 0 %}
+    <div class="sync-progress-wrap" id="progress-wrap-{{ item.id }}"
+         data-local="{{ local }}" data-total="{{ total }}"
+         {% if not show_bar %}style="display:none"{% endif %}>
+      <div class="sync-progress-bar">
+        <div class="sync-progress-fill" id="progress-fill-{{ item.id }}" style="width: {{ pct }}%"></div>
+      </div>
+      <span class="sync-progress-text" id="progress-text-{{ item.id }}">
+        {% if show_bar %}{{ "{:,}".format(local) }} of {{ "{:,}".format(total) }} downloaded{% endif %}
+      </span>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="item-controls">
+    {% if full %}
+    <label class="track-label" title="{% if enabled %}Stop auto-syncing (keeps downloaded files){% else %}Download new tracks on a schedule{% endif %}">
+      <input type="checkbox" class="track-checkbox" {% if enabled %}checked{% endif %}
+             aria-label="Auto-sync {{ item.name }}"
+             onchange="toggleTarget('{{ item.id }}', this)">
+      <span class="track-box" aria-hidden="true"></span>
+      <span class="track-text" aria-hidden="true">Auto-sync</span>
+    </label>
+
+    <select name="schedule" class="schedule-select" aria-label="Sync schedule for {{ item.name }}"
+            onchange="updateSchedule('{{ item.id }}', this.value)"
+            {% if not enabled %}disabled title="Turn on Auto-sync to pick a schedule"{% endif %}>
+      {% for value, label in [("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly")] %}
+      <option value="{{ value }}" {% if (item.schedule or "daily") == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+
+    <button class="btn-secondary btn-sync{% if is_syncing %} syncing{% endif %}" data-id="{{ item.id }}"
+            aria-label="Sync {{ item.name }} now" {% if is_syncing %}disabled{% endif %}>
+      ↻ {% if is_syncing %}Syncing…{% else %}Sync{% endif %}
+    </button>
+
+    {% if local > 0 %}
+    <a href="/targets/{{ item.id }}/download-zip" download class="btn-secondary btn-zip"
+       aria-label="Download {{ item.name }} as a ZIP">⬇︎ ZIP</a>
+    {% endif %}
+    {% else %}
+    <button class="btn-secondary btn-autosync" data-id="{{ item.id }}"
+            data-name="{{ item.name }}" data-tracks="{{ item.track_count or 0 }}"
+            aria-label="Auto-sync {{ item.name }}" title="Download it now and keep it in sync daily">Auto-sync</button>
+    {% endif %}
+  </div>
+</div>
+{% endmacro %}
 
 {% block content %}
 <div class="page">
+  <div class="dash-header">
+    <div class="dash-title">
+      <h1 class="page-title">Library</h1>
+      <div class="lib-stats">
+        <span title="Downloaded tracks across all playlists"><strong>{{ "{:,}".format(stats.total_tracks) }}</strong> tracks</span>
+        <span id="lib-disk" class="muted-stat"></span>
+        <span title="Playlists &amp; albums set to sync automatically"><strong>{{ stats.enabled_targets }}</strong> auto-syncing</span>
+        {% if overdue_count %}<span class="stat-overdue" title="Auto-sync playlists that missed their scheduled sync. Schedules only run while localfy is running; Sync catches one up now.">{{ overdue_count }} overdue</span>{% endif %}
+        {% if stats.failed_tracks %}
+        <button type="button" class="stat-failed" id="filter-failed" aria-pressed="false"
+                title="Show only playlists with tracks that couldn't be downloaded">⚠︎ {{ stats.failed_tracks }} failed</button>
+        {% endif %}
+        <span id="lib-queue" class="stat-queue" hidden></span>
+        <button type="button" id="lib-refresh" class="lib-refresh" title="Re-read your playlists and albums from Spotify">↻ Refresh</button>
+      </div>
+    </div>
+    <form class="add-url-form" id="add-url-form">
+      <input type="url" id="add-url-input" class="add-url-input" autocomplete="off"
+             placeholder="Paste a Spotify playlist or album link" aria-label="Add a playlist or album by Spotify link">
+      <button type="submit" class="btn-secondary btn-add-url">Add</button>
+    </form>
+  </div>
+
   {% if error %}
   <div class="error-banner">{{ error }}</div>
   {% endif %}
 
-  <div class="dash-header">
-    <div class="lib-stats">
-      <span title="Downloaded tracks across all playlists"><strong>{{ stats.total_tracks }}</strong> tracks</span>
-      <span id="lib-disk" class="muted-stat"></span>
-      <span title="Playlists &amp; albums set to sync automatically"><strong>{{ stats.enabled_targets }}</strong> auto-syncing</span>
-      {% if stats.failed_tracks %}<span class="stat-failed" title="Tracks that couldn't be downloaded — open a playlist marked ⚠ to retry">⚠ {{ stats.failed_tracks }} failed</span>{% endif %}
-      <span id="lib-queue" class="stat-queue" hidden></span>
-    </div>
-    <form class="add-url-form" id="add-url-form">
-      <input type="url" id="add-url-input" class="add-url-input" autocomplete="off"
-             placeholder="Add a Spotify playlist/album URL…" aria-label="Add a playlist or album by Spotify URL">
-      <button type="submit" class="btn-add-url">+ Add</button>
-    </form>
-  </div>
-
   <div class="dash-search-wrap">
-    <span class="dash-search-icon" aria-hidden="true">⌕</span>
-    <input type="search" id="dash-search" class="dash-search"
-           placeholder="Filter by name…" autocomplete="off" spellcheck="false">
+    <span class="dash-search-icon">{{ icon("search") }}</span>
+    <input type="search" id="dash-search" class="dash-search" aria-label="Filter playlists and albums"
+           placeholder="Filter playlists and albums…" autocomplete="off" spellcheck="false">
   </div>
-  <div id="dash-no-results" class="dash-no-results" style="display:none">No matches.</div>
+  <div id="dash-no-results" class="dash-no-results" hidden>No playlists or albums match.</div>
 
-  {% set liked = items | selectattr("type", "eq", "liked_songs") | list %}
-  {% set playlists = items | selectattr("type", "eq", "playlist") | list %}
-  {% set albums = items | selectattr("type", "eq", "album") | list %}
-
-  {% for section_items, label in [(liked, "Liked Songs"), (playlists, "Playlists"), (albums, "Saved Albums")] %}
-  {% if section_items %}
-  <div class="section-header">
-    <h2>{{ label }}</h2>
-    <span class="badge">{{ section_items | length }}</span>
-  </div>
-  <div class="item-list">
-    {% for item in section_items %}
-    {% set target = db_targets.get(item.id, {}) %}
-    {% set enabled = target.get("enabled", 0) %}
-    {% set schedule = target.get("schedule", "daily") %}
-    {% set last_synced = target.get("last_synced") %}
-    {% set local = local_counts.get(item.id, 0) %}
-    {% set is_syncing = item.id in syncing %}
-    {% set is_partial = local > 0 and item.track_count and local < item.track_count %}
-    <div class="item-card {% if enabled %}enabled{% endif %} {% if is_partial %}partial{% endif %}" id="card-{{ item.id }}">
-
-      <div class="item-art-wrap"
-           {% if local > 0 %}data-target-id="{{ item.id }}" data-image="{{ item.image_url or '' }}"{% endif %}>
-        {% if item.image_url %}
-        <img class="item-art" src="{{ item.image_url }}" alt="">
-        {% else %}
-        <div class="item-art-placeholder">
-          {% if item.type == "liked_songs" %}♥{% elif item.type == "album" %}💿{% else %}♫{% endif %}
-        </div>
-        {% endif %}
-        {% if local > 0 %}
-        <button class="art-play-btn" title="Play">▶</button>
-        {% endif %}
-      </div>
-
-      <div class="item-info">
-        <a class="item-name" href="/targets/{{ item.id }}">{{ item.name }}</a>
-        <div class="item-meta">
-          {% if local > 0 and item.track_count and local < item.track_count %}
-            <span style="color:var(--amber)">{{ local }}</span> / {{ item.track_count }} tracks
-          {% elif local > 0 %}
-            {{ local }} tracks
-          {% elif item.track_count is not none %}
-            {{ item.track_count }} tracks
-          {% else %}
-            —
-          {% endif %}
-          {% if item.type == "playlist" %}&nbsp;· playlist{% elif item.type == "album" %}&nbsp;· album{% endif %}
-          {% set fc = failed_counts.get(item.id, 0) %}
-          {% if fc %}&nbsp;· <a class="failed-badge" href="/targets/{{ item.id }}" title="{{ fc }} tracks couldn't be downloaded">⚠ {{ fc }}</a>{% endif %}
-        </div>
-        {% set total = item.track_count or 0 %}
-        {% set show_bar = (total > 0 and (enabled or local > 0)) or is_syncing %}
-        {% set pct = (100 * local // total) if total > 0 else 0 %}
-        <div class="sync-progress-wrap" id="progress-wrap-{{ item.id }}"
-             data-local="{{ local }}" data-total="{{ total }}"
-             {% if not show_bar %}style="display:none"{% endif %}>
-          <div class="sync-progress-bar">
-            <div class="sync-progress-fill" id="progress-fill-{{ item.id }}"
-                 style="width: {{ pct }}%"></div>
-          </div>
-          <span class="sync-progress-text" id="progress-text-{{ item.id }}">
-            {% if show_bar %}{{ local }} of {{ total }} downloaded{% endif %}
-          </span>
-        </div>
-      </div>
-
-      <div class="item-controls">
-        <select name="schedule" class="schedule-select"
-                onchange="updateSchedule('{{ item.id }}', this.value)"
-                {% if not enabled %}disabled{% endif %}>
-          <option value="daily" {% if schedule == "daily" %}selected{% endif %}>Daily</option>
-          <option value="weekly" {% if schedule == "weekly" %}selected{% endif %}>Weekly</option>
-          <option value="monthly" {% if schedule == "monthly" %}selected{% endif %}>Monthly</option>
-        </select>
-
-        {% if local > 0 %}
-        <a href="/targets/{{ item.id }}/download-zip" download
-           class="btn-zip" title="Download all as ZIP">⬇ ZIP</a>
-        {% endif %}
-
-        <button class="btn-sync {% if is_syncing %}syncing{% endif %}" data-id="{{ item.id }}"
-                title="Sync now" {% if is_syncing %}disabled{% endif %}>
-          ↻ {% if is_syncing %}Syncing…{% else %}Sync{% endif %}
-        </button>
-
-        <label class="track-label" title="{% if enabled %}Stop tracking (keeps downloaded files){% else %}Start tracking{% endif %}">
-          <input type="checkbox" class="track-checkbox" {% if enabled %}checked{% endif %}
-                 onchange="toggleTarget('{{ item.id }}', this)">
-          <span class="track-box"></span>
-          <span class="track-text" id="track-text-{{ item.id }}">{% if enabled %}Tracking{% else %}Track{% endif %}</span>
-        </label>
-
-        <span class="last-synced" id="synced-{{ item.id }}">
-          {% if last_synced %}
-            {{ last_synced[:10] }}
-          {% else %}
-            Never synced
-          {% endif %}
-        </span>
-      </div>
+  <section class="lib-section" id="synced-section" aria-labelledby="synced-heading">
+    <div class="section-header">
+      <h2 id="synced-heading">Synced</h2>
+      <span class="badge" data-count-for="synced-list">{{ synced_items | length }}</span>
     </div>
-    {% endfor %}
-  </div>
-  {% endif %}
-  {% endfor %}
+    {% if synced_items %}
+    <div class="item-list" id="synced-list">
+      {% for item in synced_items %}{{ card(item, true) }}{% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-inline">
+      <p>Nothing synced yet.</p>
+      <p class="muted-text">Pick a playlist below and choose <strong>Auto-sync</strong>, or paste a Spotify link above.</p>
+    </div>
+    {% endif %}
+  </section>
 
-  {% if not error and not playlists and not albums %}
+  {% if library_items %}
+  <details class="lib-section lib-more" id="lib-more" {% if not synced_items %}open{% endif %}>
+    <summary class="section-header">
+      <span class="lib-more-chevron">{{ icon("chevron") }}</span>
+      <h2>In your Spotify library</h2>
+      <span class="badge" data-count-for="library-list">{{ library_items | length }}</span>
+    </summary>
+    <p class="lib-more-hint muted-text">Not synced. <strong>Auto-sync</strong> downloads one now and keeps it current.</p>
+    <div class="item-list" id="library-list">
+      {% for item in library_items %}{{ card(item, false) }}{% endfor %}
+    </div>
+  </details>
+  {% endif %}
+
+  {% if not error and not synced_items and not library_items %}
   <div class="empty-state">
     <p>No playlists or albums yet.</p>
     <p class="muted-text">Follow playlists on Spotify, or paste a link in the box above to start downloading.</p>
@@ -149,19 +170,25 @@
 
 {% block scripts %}
 <script>
+// Wrapped so in-app navigation can run this script again: the SPA re-executes
+// page scripts in the same global scope, where a second top-level `const`
+// would throw and leave every control on the page dead.
+(function () {
 // Timers registered here are cleared when the SPA navigates away (no leaked polls).
 const _timers = new Set();
 const _track = id => { _timers.add(id); return id; };
 window.__pageCleanup = window.__pageCleanup || [];
 window.__pageCleanup.push(() => { _timers.forEach(t => { clearInterval(t); clearTimeout(t); }); _timers.clear(); });
 
+const _post = (url, body) => fetch(url, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: body || '',
+});
+
 async function updateSchedule(id, schedule) {
   try {
-    const res = await fetch('/targets/' + id + '/schedule', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'schedule=' + schedule,
-    });
+    const res = await _post('/targets/' + id + '/schedule', 'schedule=' + schedule);
     if (!res.ok) throw new Error();
     showToast('Schedule updated.', 'success');
   } catch (_) {
@@ -184,26 +211,35 @@ function showToast(message, type = 'success') {
 
 async function toggleTarget(id, checkbox) {
   const card = document.getElementById('card-' + id);
-  const label = document.getElementById('track-text-' + id);
   try {
-    const res = await fetch('/targets/' + id + '/toggle', { method: 'POST' });
+    // Send the state the checkbox now shows rather than asking the server to
+    // flip it, so a fast double-click can't leave the two out of step.
+    const res = await _post('/targets/' + id + '/toggle', 'enabled=' + (checkbox.checked ? 'true' : 'false'));
+    if (!res.ok) throw new Error();
     const data = await res.json();
-    if (data.enabled) {
-      card.classList.add('enabled');
-      if (label) label.textContent = 'Tracking';
-    } else {
-      card.classList.remove('enabled');
-      if (label) label.textContent = 'Track';
-    }
+    card.classList.toggle('enabled', data.enabled);
     const sel = card.querySelector('select.schedule-select');
-    if (sel) sel.disabled = !data.enabled;
+    if (sel) {
+      sel.disabled = !data.enabled;
+      sel.title = data.enabled ? '' : 'Turn on Auto-sync to pick a schedule';
+    }
+    const when = document.getElementById('synced-' + id);
+    if (when) when.classList.remove('overdue');
   } catch (e) {
     checkbox.checked = !checkbox.checked;
-    console.error(e);
+    showToast("Couldn't change auto-sync.", 'error');
   }
 }
 
 const _activePolls = new Set();
+const _fmt = n => (+n || 0).toLocaleString();
+
+function _setSyncBtn(btn, syncing) {
+  if (!btn) return;
+  btn.classList.toggle('syncing', syncing);
+  btn.textContent = syncing ? '↻ Syncing…' : '↻ Sync';
+  btn.disabled = syncing;
+}
 
 function _updateProgressUI(id, p) {
   const fill = document.getElementById('progress-fill-' + id);
@@ -220,9 +256,9 @@ function _updateProgressUI(id, p) {
     }
   }
   const parts = [];
-  if (p.downloaded > 0) parts.push(`${p.downloaded} downloaded`);
-  if (p.skipped > 0) parts.push(`${p.skipped} already had`);
-  if (total > 0) parts.push(`of ${total}`);
+  if (p.downloaded > 0) parts.push(`${_fmt(p.downloaded)} downloaded`);
+  if (p.skipped > 0) parts.push(`${_fmt(p.skipped)} already had`);
+  if (total > 0) parts.push(`of ${_fmt(total)}`);
   let label = parts.join(' · ') || 'Preparing…';
   if (p.current) label += ` — ↓ ${p.current}`;
   if (text) text.textContent = label;
@@ -240,7 +276,7 @@ function _restingProgress(id) {
   if (total > 0 && local > 0) {
     wrap.style.display = 'flex';
     if (fill) { fill.style.width = Math.min(100, Math.round(local / total * 100)) + '%'; fill.classList.remove('indeterminate'); }
-    if (text) text.textContent = `${local} of ${total} downloaded`;
+    if (text) text.textContent = `${_fmt(local)} of ${_fmt(total)} downloaded`;
   } else {
     wrap.style.display = 'none';
   }
@@ -255,12 +291,10 @@ function startPolling(id, triggerSync) {
   const wrap = document.getElementById('progress-wrap-' + id);
   const fill = document.getElementById('progress-fill-' + id);
 
-  if (btn) { btn.classList.add('syncing'); btn.textContent = '↻ Syncing…'; btn.disabled = true; }
+  _setSyncBtn(btn, true);
   if (wrap) wrap.style.display = 'flex';
 
-  const kickoff = triggerSync
-    ? fetch('/targets/' + id + '/sync', { method: 'POST' })
-    : Promise.resolve();
+  const kickoff = triggerSync ? _post('/targets/' + id + '/sync') : Promise.resolve();
 
   kickoff.then(() => {
     const interval = _track(setInterval(async () => {
@@ -275,7 +309,7 @@ function startPolling(id, triggerSync) {
           clearInterval(interval);
           _activePolls.delete(id);
           if (window.SYNC) window.SYNC.clear(id);
-          if (btn) { btn.classList.remove('syncing'); btn.textContent = '↻ Sync'; btn.disabled = false; }
+          _setSyncBtn(btn, false);
 
           // Update the resting download count from the final tallies, then
           // settle the bar back to its "x of y downloaded" state.
@@ -289,7 +323,7 @@ function startPolling(id, triggerSync) {
           // Server only updates last_synced on success — mirror that here.
           if (p.status === 'done') {
             const el = document.getElementById('synced-' + id);
-            if (el) el.textContent = new Date().toISOString().slice(0, 10);
+            if (el) { el.textContent = 'Synced just now'; el.classList.remove('overdue'); }
           }
 
           // Only announce completion if we actually observed this run in
@@ -299,13 +333,13 @@ function startPolling(id, triggerSync) {
             const name = document.querySelector(`#card-${id} .item-name`)?.textContent || 'Playlist';
             if (p.status === 'done') {
               const parts = [];
-              if (p.downloaded > 0) parts.push(`${p.downloaded} new track${p.downloaded !== 1 ? 's' : ''} downloaded`);
-              if (p.skipped > 0) parts.push(`${p.skipped} already up to date`);
+              if (p.downloaded > 0) parts.push(`${_fmt(p.downloaded)} new track${p.downloaded !== 1 ? 's' : ''} downloaded`);
+              if (p.skipped > 0) parts.push(`${_fmt(p.skipped)} already up to date`);
               const msg = parts.length ? parts.join(', ') + '.' : 'Sync complete.';
               showToast(`${name}: ${msg}`, 'success');
               if (p.downloaded > 0 && window.notify) window.notify(`${name} synced`, msg);
             } else {
-              showToast(`${name}: sync failed. Check logs.`, 'error');
+              showToast(`${name}: sync failed. See Activity for details.`, 'error');
             }
           }
         } else {
@@ -317,7 +351,7 @@ function startPolling(id, triggerSync) {
           } else {
             clearInterval(interval);
             _activePolls.delete(id);
-            if (btn) { btn.classList.remove('syncing'); btn.textContent = '↻ Sync'; btn.disabled = false; }
+            _setSyncBtn(btn, false);
             _restingProgress(id);
           }
         }
@@ -328,7 +362,7 @@ function startPolling(id, triggerSync) {
       clearInterval(interval);
       _activePolls.delete(id);
       if (window.SYNC) window.SYNC.clear(id);
-      if (btn) { btn.classList.remove('syncing'); btn.textContent = '↻ Sync'; btn.disabled = false; }
+      _setSyncBtn(btn, false);
       _restingProgress(id);
     }, 600000));
   }).catch(() => { _activePolls.delete(id); });
@@ -336,27 +370,45 @@ function startPolling(id, triggerSync) {
 
 document.querySelectorAll('.btn-sync').forEach(btn => {
   btn.addEventListener('click', () => {
+    if (window.requestNotify) window.requestNotify();
     if (window.SYNC) window.SYNC.mark(btn.dataset.id);
     startPolling(btn.dataset.id, true);
   });
 });
 
+// Library cards: one click turns auto-sync on and starts the first download,
+// then the page re-renders with the card in the Synced section.
+document.querySelectorAll('.btn-autosync').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const id = btn.dataset.id;
+    const count = +btn.dataset.tracks || 0;
+    if (count > 200 && !confirm(`Auto-sync "${btn.dataset.name}"?\n\nThis downloads ${count.toLocaleString()} tracks now, then keeps the playlist in sync daily.`)) return;
+    btn.disabled = true; btn.textContent = 'Starting…';
+    if (window.requestNotify) window.requestNotify();
+    try {
+      const on = await _post('/targets/' + id + '/toggle', 'enabled=true');
+      if (!on.ok) throw new Error();
+      if (window.SYNC) window.SYNC.mark(id);
+      const sync = await _post('/targets/' + id + '/sync');
+      if (!sync.ok) throw new Error();
+      window.navigateTo('/dashboard', false);
+    } catch (_) {
+      if (window.SYNC) window.SYNC.clear(id);
+      btn.disabled = false; btn.textContent = 'Auto-sync';
+      showToast("Couldn't start auto-sync.", 'error');
+    }
+  });
+});
+
 // Resume the progress indicator for any sync already running OR just triggered
-// from another page (e.g. a playlist's "Sync & Download"). The recent-mark check
-// covers the race where this page loads before the sync registers as running.
+// from another page (e.g. a playlist's "Sync & Download"). The server renders
+// running syncs as .syncing; the recent-mark check covers the race where this
+// page loads before the sync registers as running. Anything that started after
+// render is picked up from the single /api/queue call below — no per-card fetch.
 const _recentSyncs = window.SYNC ? window.SYNC.recent() : [];
 document.querySelectorAll('.item-card[id^="card-"]').forEach(card => {
   const id = card.id.replace('card-', '');
-  // Server already marked this card syncing, or we triggered it from another
-  // page — resume the live indicator without waiting on a status fetch.
-  if (card.querySelector('.btn-sync.syncing') || _recentSyncs.includes(id)) {
-    startPolling(id, false);
-    return;
-  }
-  fetch('/targets/' + id + '/progress')
-    .then(r => r.json())
-    .then(p => { if (p.status === 'running') startPolling(id, false); })
-    .catch(() => {});
+  if (card.querySelector('.btn-sync.syncing') || _recentSyncs.includes(id)) startPolling(id, false);
 });
 
 // Album art play buttons — pre-fetch on hover so click is synchronous
@@ -371,40 +423,75 @@ document.querySelectorAll('.item-art-wrap[data-target-id]').forEach(wrap => {
       .catch(() => {});
   });
 });
-// ── Name filter ──────────────────────────────────────────────
+
+// ── Library section open/closed (remembered for this tab) ────
+const _libMore = document.getElementById('lib-more');
+if (_libMore && document.getElementById('synced-list')) {
+  try { if (sessionStorage.getItem('lfy_lib_open') === '1') _libMore.open = true; } catch (_) {}
+  _libMore.addEventListener('toggle', () => {
+    if (_libMore.dataset.filtering) return;   // opened by the filter, not the user
+    try { sessionStorage.setItem('lfy_lib_open', _libMore.open ? '1' : '0'); } catch (_) {}
+  });
+}
+
+// ── Name filter + "failed only" filter ───────────────────────
 (function () {
   const search = document.getElementById('dash-search');
-  if (!search) return;
+  const failedBtn = document.getElementById('filter-failed');
   const noResults = document.getElementById('dash-no-results');
+  let onlyFailed = false, openBefore = null;
+
   function apply() {
     const q = search.value.trim().toLowerCase();
+    const filtering = !!q || onlyFailed;
     let anyVisible = false;
     document.querySelectorAll('.item-list').forEach(list => {
       let shown = 0;
       list.querySelectorAll('.item-card').forEach(card => {
         const name = (card.querySelector('.item-name')?.textContent || '').toLowerCase();
-        const match = !q || name.includes(q);
-        card.style.display = match ? '' : 'none';
+        const match = (!q || name.includes(q)) && (!onlyFailed || +card.dataset.failed > 0);
+        card.hidden = !match;
         if (match) shown++;
       });
-      // Hide the section header (previous sibling) when its list is empty.
-      const header = list.previousElementSibling;
-      if (header && header.classList.contains('section-header')) header.style.display = shown ? '' : 'none';
-      list.style.display = shown ? '' : 'none';
+      const badge = document.querySelector(`[data-count-for="${list.id}"]`);
+      if (badge) badge.textContent = shown;
+      const section = list.closest('.lib-section');
+      if (section) section.hidden = filtering && shown === 0;
       if (shown) anyVisible = true;
     });
-    if (noResults) noResults.style.display = (q && !anyVisible) ? '' : 'none';
+    // Filtering searches the collapsed library too, so open it while a query
+    // is active and put it back the way the user had it afterwards.
+    if (_libMore) {
+      _libMore.dataset.filtering = '1';
+      if (filtering) {
+        if (openBefore === null) openBefore = _libMore.open;
+        _libMore.open = true;
+      } else if (openBefore !== null) {
+        _libMore.open = openBefore;
+        openBefore = null;
+      }
+      setTimeout(() => { delete _libMore.dataset.filtering; });
+    }
+    noResults.hidden = anyVisible || !(q || onlyFailed);
   }
   search.addEventListener('input', apply);
+  if (failedBtn) {
+    failedBtn.addEventListener('click', () => {
+      onlyFailed = !onlyFailed;
+      failedBtn.setAttribute('aria-pressed', onlyFailed ? 'true' : 'false');
+      apply();
+    });
+  }
 })();
 
 document.querySelectorAll('.art-play-btn').forEach(btn => {
   btn.addEventListener('click', async e => {
     e.preventDefault();
     e.stopPropagation();
-    // Drop focus so a subsequent spacebar toggles play/pause instead of
-    // re-activating this button (which would reload track 0 from the start).
-    btn.blur();
+    // After a pointer click, drop focus so a subsequent spacebar toggles
+    // play/pause instead of re-activating this button (which would reload
+    // track 0). Keyboard activation keeps focus in place.
+    if (e.detail > 0) btn.blur();
     const wrap = btn.closest('.item-art-wrap');
     const targetId = wrap.dataset.targetId;
     const imageUrl = wrap.dataset.image || null;
@@ -436,23 +523,19 @@ document.querySelectorAll('.art-play-btn').forEach(btn => {
     const btn = form.querySelector('button');
     btn.disabled = true; btn.textContent = 'Adding…';
     try {
-      const res = await fetch('/targets/add', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'url=' + encodeURIComponent(url),
-      });
+      const res = await _post('/targets/add', 'url=' + encodeURIComponent(url));
       const d = await res.json();
       if (res.ok && d.ok) {
         input.value = '';
         showToast(`Added "${d.name}". Syncing will begin shortly.`, 'success');
         setTimeout(() => window.navigateTo('/dashboard', false), 800);
       } else {
-        showToast(d.error || 'Could not add that URL.', 'error');
+        showToast(d.error || 'Could not add that link.', 'error');
       }
     } catch (_) {
-      showToast('Could not add that URL.', 'error');
+      showToast('Could not add that link.', 'error');
     } finally {
-      btn.disabled = false; btn.textContent = '+ Add';
+      btn.disabled = false; btn.textContent = 'Add';
     }
   });
 })();
@@ -472,6 +555,20 @@ fetch('/api/queue').then(r => r.json()).then(d => {
     el.textContent = `${d.active.length} syncing now`;
     el.hidden = false;
   }
+  (d.active || []).forEach(a => { if (document.getElementById('card-' + a.id)) startPolling(a.id, false); });
 }).catch(() => {});
+
+// Library renders from the local DB and refreshes from Spotify in the
+// background; this forces a refresh now (e.g. right after following a playlist).
+document.getElementById('lib-refresh')?.addEventListener('click', async e => {
+  e.currentTarget.disabled = true;
+  e.currentTarget.textContent = 'Refreshing…';
+  await window.navigateTo('/dashboard?refresh=1', false);
+});
+
+// Used by inline onchange handlers in the cards.
+window.updateSchedule = updateSchedule;
+window.toggleTarget = toggleTarget;
+})();
 </script>
 {% endblock %}

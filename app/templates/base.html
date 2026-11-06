@@ -1,3 +1,4 @@
+{% from "_icons.html" import icon %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7,25 +8,27 @@
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="manifest" href="/static/manifest.webmanifest">
   <meta name="theme-color" content="#0d0d0d">
-  <link rel="stylesheet" href="/static/style.css?v=7">
+  <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
+<a class="skip-link" href="#app-content">Skip to content</a>
 
 {% block nav %}
 <nav>
   <a class="nav-logo" href="/dashboard">localfy</a>
   <div class="nav-search-wrap">
-    <input type="search" id="global-search" class="nav-search" placeholder="Search your library…"
-           autocomplete="off" spellcheck="false" aria-label="Search downloaded tracks"
-           aria-expanded="false" aria-controls="global-search-results">
-    <div id="global-search-results" class="nav-search-results" role="listbox"
+    <input type="search" id="global-search" class="nav-search" placeholder="Search tracks…"
+           autocomplete="off" spellcheck="false" aria-label="Search tracks (press / to focus)"
+           aria-controls="global-search-results" aria-keyshortcuts="/">
+    <div id="global-search-results" class="nav-search-results"
          aria-label="Search results" hidden></div>
   </div>
+  {% set path = request.url.path %}
   <div class="nav-links">
-    <a href="/dashboard">Library</a>
-    <a href="/activity">Activity</a>
-    <a href="/settings">Settings</a>
-    <a href="/auth/logout">Disconnect</a>
+    <a href="/dashboard" {% if path == "/dashboard" or path.startswith("/targets/") %}aria-current="page"{% endif %}>Library</a>
+    <a href="/activity" {% if path == "/activity" %}aria-current="page"{% endif %}>Activity</a>
+    <a href="/settings" {% if path == "/settings" %}aria-current="page"{% endif %}>Settings</a>
+    <a href="/auth/logout" class="nav-disconnect">Disconnect</a>
   </div>
 </nav>
 {% endblock %}
@@ -36,7 +39,7 @@
 <!-- Player: lives outside #app-content so it's never destroyed by SPA navigation -->
 <div id="player" class="player" style="display:none">
   <div class="player-left">
-    <div id="player-art-wrap"><div class="player-art-ph">♫</div></div>
+    <div id="player-art-wrap"><div class="player-art-ph">{{ icon("music") }}</div></div>
     <div class="player-track-info">
       <div class="player-title" id="player-title">—</div>
       <div class="player-artist" id="player-artist">Select a track</div>
@@ -47,9 +50,9 @@
       <button class="ctrl-btn ctrl-toggle" id="btn-shuffle" title="Shuffle" aria-label="Shuffle" aria-pressed="false">
         <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
       </button>
-      <button class="ctrl-btn" id="btn-prev" title="Previous" aria-label="Previous track">⏮</button>
-      <button class="ctrl-btn ctrl-play" id="btn-play" title="Play/Pause" aria-label="Play" aria-pressed="false">▶</button>
-      <button class="ctrl-btn" id="btn-next" title="Next" aria-label="Next track">⏭</button>
+      <button class="ctrl-btn" id="btn-prev" title="Previous" aria-label="Previous track">{{ icon("skip-back") }}</button>
+      <button class="ctrl-btn ctrl-play" id="btn-play" title="Play/Pause" aria-label="Play" aria-pressed="false">{{ icon("play") }}</button>
+      <button class="ctrl-btn" id="btn-next" title="Next" aria-label="Next track">{{ icon("skip-forward") }}</button>
       <button class="ctrl-btn ctrl-toggle" id="btn-repeat" title="Repeat off" aria-label="Repeat off" aria-pressed="false"></button>
     </div>
     <div class="player-scrubber">
@@ -87,6 +90,22 @@
   const timeCur  = document.getElementById('time-cur');
   const timeDur  = document.getElementById('time-dur');
   const volEl    = document.getElementById('vol');
+
+  const _ICON_PLAY = {{ icon("play") | tojson }};
+  const _ICON_PAUSE = {{ icon("pause") | tojson }};
+  const _ICON_NOTE = {{ icon("music") | tojson }};
+
+  // The player is fixed to the bottom; pages reserve its real height (it
+  // grows on phones) so nothing at the end of a page ends up underneath it.
+  function _showPlayer() {
+    playerEl.style.display = '';
+    document.body.classList.add('has-player');
+  }
+  if ('ResizeObserver' in window) {
+    new ResizeObserver(() => {
+      document.documentElement.style.setProperty('--player-h', playerEl.offsetHeight + 'px');
+    }).observe(playerEl);
+  }
 
   let _tracks = [], _index = -1, _targetId = null, _imageUrl = null, _seeking = false;
   let _shuffle = false, _repeat = 0;   // repeat: 0 = off, 1 = all, 2 = one track
@@ -142,6 +161,9 @@
     audio.loop = false;   // looping is handled manually so 'ended' still fires
   }
 
+  // Fill the played / volume part of a range slider (see .player-seek CSS).
+  function _paint(el) { el.style.setProperty('--pct', (el.value / (el.max || 100)) * 100 + '%'); }
+
   function fmt(s) {
     if (!isFinite(s) || isNaN(s)) return '0:00';
     return `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
@@ -161,7 +183,7 @@
     _imageUrl = url;
     artWrap.innerHTML = url
       ? `<img class="player-art" src="${url}" alt="">`
-      : `<div class="player-art-ph">♫</div>`;
+      : `<div class="player-art-ph">${_ICON_NOTE}</div>`;
   }
 
   function _highlightRows() {
@@ -216,11 +238,12 @@
     audio.load();
     audio.volume = volEl.value / 100;
     seekEl.value = 0;
+    _paint(seekEl);
     timeCur.textContent = '0:00';
     timeDur.textContent = '0:00';
     titleEl.textContent = t.title || t.filename;
     artistEl.textContent = t.artist || '';
-    playerEl.style.display = '';
+    _showPlayer();
     _updateMediaSession();
     _highlightRows();
     _save();
@@ -241,39 +264,42 @@
     const next = _stepEnded();
     if (next !== null) _loadTrack(next);                  // else stop at end of queue
   });
-  btnShuffle.addEventListener('click', () => {
+  // After a mouse/touch click, drop focus so Space goes back to play/pause.
+  // Keyboard activation (e.detail === 0) keeps focus where the user is.
+  btnShuffle.addEventListener('click', e => {
     _shuffle = !_shuffle;
-    btnShuffle.blur();
+    if (e.detail > 0) btnShuffle.blur();
     _buildOrder();
     _updateModes();
     _save();
   });
-  btnRepeat.addEventListener('click', () => {
+  btnRepeat.addEventListener('click', e => {
     _repeat = (_repeat + 1) % 3;
-    btnRepeat.blur();
+    if (e.detail > 0) btnRepeat.blur();
     _updateModes();
     _save();
   });
-  audio.addEventListener('play',  () => { btnPlay.textContent = '⏸'; btnPlay.setAttribute('aria-pressed', 'true'); btnPlay.setAttribute('aria-label', 'Pause'); });
-  audio.addEventListener('pause', () => { btnPlay.textContent = '▶'; btnPlay.setAttribute('aria-pressed', 'false'); btnPlay.setAttribute('aria-label', 'Play'); });
+  audio.addEventListener('play',  () => { btnPlay.innerHTML = _ICON_PAUSE; btnPlay.setAttribute('aria-pressed', 'true'); btnPlay.setAttribute('aria-label', 'Pause'); });
+  audio.addEventListener('pause', () => { btnPlay.innerHTML = _ICON_PLAY; btnPlay.setAttribute('aria-pressed', 'false'); btnPlay.setAttribute('aria-label', 'Play'); });
 
-  seekEl.addEventListener('mousedown', () => { _seeking = true; });
-  seekEl.addEventListener('touchstart', () => { _seeking = true; }, { passive: true });
+  // `input` previews the time while dragging; `change` commits the seek. It
+  // fires on pointer release and on every keyboard step (arrows, Home/End).
+  seekEl.addEventListener('pointerdown', () => { _seeking = true; });
   seekEl.addEventListener('input', () => {
+    _paint(seekEl);
     if (isFinite(audio.duration)) timeCur.textContent = fmt((seekEl.value / 100) * audio.duration);
   });
-  function _finishSeek() {
-    if (!_seeking) return;
+  seekEl.addEventListener('change', () => {
     _seeking = false;
     if (isFinite(audio.duration)) audio.currentTime = (seekEl.value / 100) * audio.duration;
-  }
-  seekEl.addEventListener('mouseup', _finishSeek);
-  seekEl.addEventListener('touchend', _finishSeek);
+  });
+  ['pointercancel', 'blur'].forEach(ev => seekEl.addEventListener(ev, () => { _seeking = false; }));
 
   let _lastSave = 0;
   audio.addEventListener('timeupdate', () => {
     if (_seeking || !isFinite(audio.duration) || !audio.duration) return;
     seekEl.value = (audio.currentTime / audio.duration) * 100;
+    _paint(seekEl);
     timeCur.textContent = fmt(audio.currentTime);
     timeDur.textContent = fmt(audio.duration);
     seekEl.setAttribute('aria-valuetext', fmt(audio.currentTime) + ' of ' + fmt(audio.duration));
@@ -283,6 +309,7 @@
   });
   audio.addEventListener('loadedmetadata', () => { timeDur.textContent = fmt(audio.duration); });
   volEl.addEventListener('input', () => {
+    _paint(volEl);
     audio.volume = volEl.value / 100;
     volEl.setAttribute('aria-valuetext', volEl.value + '%');
     _save();
@@ -308,12 +335,14 @@
       if (s.time > 0) {
         audio.addEventListener('loadedmetadata', () => { audio.currentTime = s.time; }, { once: true });
       }
-      playerEl.style.display = '';
+      _showPlayer();
       _updateMediaSession();
     } catch (_) {}
   })();
 
   _updateModes();   // reflect restored (or default) shuffle/repeat state in the UI
+  _paint(volEl);
+  _paint(seekEl);
 
   // Public API used by detail page scripts
   window.PLAYER = {
@@ -381,6 +410,7 @@
     fns.forEach(fn => { try { fn(); } catch (_) {} });
   }
 
+  window.announce = msg => _announce(msg);
   function _announce(msg) {
     const el = document.getElementById('sr-announce');
     if (el) el.textContent = msg;
@@ -393,6 +423,16 @@
 
   // SPA navigation always lands at the top of the new page.
   history.scrollRestoration = 'manual';
+
+  // The nav lives outside #app-content, so SPA navigation updates its
+  // current-page marker by hand (the server sets it on full loads).
+  function _markCurrentNav(pathname) {
+    document.querySelectorAll('.nav-links a').forEach(a => {
+      const href = a.getAttribute('href');
+      const current = href === pathname || (href === '/dashboard' && pathname.startsWith('/targets/'));
+      if (current) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    });
+  }
 
   async function navigateTo(url, pushState) {
     const wantedPath = new URL(url, location.href).pathname;
@@ -412,10 +452,17 @@
 
       document.getElementById('app-content').innerHTML = newBlock.innerHTML;
       document.title = doc.title;
+      _markCurrentNav(wantedPath);
 
-      // Always land at the top of the new page.
-      window.scrollTo(0, 0);
-      requestAnimationFrame(() => window.scrollTo(0, 0));   // re-apply once layout settles
+      // Land at the #hash target if the link had one (e.g. a card's ⚠ badge
+      // → the failed-tracks section), otherwise at the top of the new page.
+      const hash = new URL(url, location.href).hash;
+      const landing = () => {
+        const el = hash && document.getElementById(decodeURIComponent(hash.slice(1)));
+        el ? el.scrollIntoView() : window.scrollTo(0, 0);
+      };
+      landing();
+      requestAnimationFrame(landing);   // re-apply once layout settles
 
       document.getElementById('app-content').querySelectorAll('script').forEach(old => {
         const s = document.createElement('script');
@@ -472,13 +519,27 @@
   });
 
   // ── Sync-complete notifications ───────────────────────────
-  window.notify = function (title, body) {
+  // Permission is asked when the user starts a sync (a click they made), never
+  // out of the blue when one finishes; notify() only shows if it was granted.
+  window.requestNotify = function () {
     try {
-      if (!('Notification' in window) || Notification.permission === 'denied') return;
-      if (Notification.permission === 'granted') { new Notification(title, { body }); return; }
-      Notification.requestPermission().then(p => { if (p === 'granted') new Notification(title, { body }); });
+      if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
     } catch (_) {}
   };
+  window.notify = function (title, body) {
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') new Notification(title, { body });
+    } catch (_) {}
+  };
+
+  // "/" focuses track search from anywhere outside a text field.
+  document.addEventListener('keydown', e => {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+    const a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable)) return;
+    const input = document.getElementById('global-search');
+    if (input) { e.preventDefault(); input.focus(); }
+  });
 
   // ── Global library search ─────────────────────────────────
   (function () {
@@ -488,27 +549,29 @@
     let timer = null, results = [], spResults = [];
     const esc = s => { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; };
 
-    function close() { box.hidden = true; box.innerHTML = ''; input.setAttribute('aria-expanded', 'false'); }
+    function close() { box.hidden = true; box.innerHTML = ''; }
     function render() {
-      const parts = [];
+      const parts = ['<div class="nav-search-divider nav-search-divider-first">In your library</div>'];
       parts.push(results.length
-        ? results.map((r, i) => `<button class="nav-search-item" role="option" data-i="${i}">
+        ? results.map((r, i) => `<button class="nav-search-item" data-i="${i}" aria-label="Play ${esc(r.title)} by ${esc(r.artist)}">
             <span class="nsi-title">${esc(r.title)}</span>
             <span class="nsi-meta">${esc(r.artist)} · ${esc(r.target_name)}</span></button>`).join('')
         : '<div class="nav-search-empty">No matches in your downloads</div>');
       if (spResults.length) {
         parts.push('<div class="nav-search-divider">From Spotify — download to Singles</div>');
-        parts.push(spResults.map((r, i) => `<div class="nav-search-item nsi-sp" role="option">
+        parts.push(spResults.map((r, i) => `<div class="nav-search-item nsi-sp">
             <div class="nsi-sp-text">
               <span class="nsi-title">${esc(r.name)}</span>
               <span class="nsi-meta">${esc(r.artist)}${r.album ? ' · ' + esc(r.album) : ''}</span>
             </div>
             <button class="nsi-dl" data-track-id="${esc(r.id)}" title="Download to Singles"
-                    aria-label="Download ${esc(r.name)} to Singles">⬇</button></div>`).join(''));
+                    aria-label="Download ${esc(r.name)} to Singles">⬇\uFE0E</button></div>`).join(''));
       }
       box.innerHTML = parts.join('');
       box.hidden = false;
-      input.setAttribute('aria-expanded', 'true');
+      const n = results.length, m = spResults.length;
+      _announce(`${n || 'No'} track${n === 1 ? '' : 's'} in your library` +
+                (m ? `, ${m} from Spotify` : '') + '. Press down arrow to browse.');
     }
 
     input.addEventListener('input', () => {
@@ -536,10 +599,14 @@
           if (r.status === 'done') {
             clearInterval(t);
             btn.textContent = '✓'; btn.classList.add('done'); btn.title = 'Downloaded to Singles';
+            btn.setAttribute('aria-label', 'Downloaded to Singles');
+            _announce('Downloaded to Singles.');
           } else if (r.status === 'error') {
             clearInterval(t);
             btn.disabled = false; btn.textContent = '✗';
             btn.title = r.message || 'Download failed — try again';
+            btn.setAttribute('aria-label', 'Download failed: ' + btn.title);
+            _announce('Download failed. ' + (r.message || ''));
           }
         } catch (_) {}
       }, 2000);
@@ -552,6 +619,7 @@
         e.stopPropagation();
         const id = dl.dataset.trackId;
         dl.disabled = true; dl.textContent = '⟳';
+        _announce('Downloading to Singles…');
         try {
           const res = await fetch('/api/singles/download', {
             method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -565,20 +633,44 @@
       const btn = e.target.closest('.nav-search-item');
       if (!btn || btn.classList.contains('nsi-sp')) return;
       const r = results[+btn.dataset.i];
-      if (r) window.PLAYER.load([{ filename: r.filename, title: r.title, artist: r.artist }], 0, r.target_id, null);
       close(); input.value = '';
+      if (!r) return;
+      // Play it inside its playlist (so Next continues there) with its artwork;
+      // fall back to the lone track if the list can't be loaded.
+      let tracks = [{ filename: r.filename, title: r.title, artist: r.artist }], at = 0;
+      try {
+        const d = await fetch('/targets/' + encodeURIComponent(r.target_id) + '/local-tracks').then(x => x.json());
+        const i = (d.tracks || []).findIndex(t => t.filename === r.filename);
+        if (i !== -1) { tracks = d.tracks; at = i; }
+      } catch (_) {}
+      window.PLAYER.load(tracks, at, r.target_id, r.image_url || null);
     });
     input.addEventListener('keydown', e => { if (e.key === 'Escape') { close(); input.blur(); } });
+    // Arrow keys move between results (and back up into the field); Escape
+    // closes and returns to the field.
+    function _focusables() { return Array.from(box.querySelectorAll('button:not(:disabled)')); }
+    input.addEventListener('keydown', e => {
+      if (e.key !== 'ArrowDown' || box.hidden) return;
+      const first = _focusables()[0];
+      if (first) { e.preventDefault(); first.focus(); }
+    });
+    box.addEventListener('keydown', e => {
+      const items = _focusables();
+      const i = items.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown' && i < items.length - 1) { e.preventDefault(); items[i + 1].focus(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); (i > 0 ? items[i - 1] : input).focus(); }
+      else if (e.key === 'Escape') { e.preventDefault(); close(); input.focus(); }
+    });
     document.addEventListener('click', e => { if (!e.target.closest('.nav-search-wrap')) close(); });
   })();
 })();
 </script>
 
 <!-- Swappable page content -->
-<div id="app-content">
+<main id="app-content" tabindex="-1">
 {% block content %}{% endblock %}
 {% block scripts %}{% endblock %}
-</div>
+</main>
 
 </body>
 </html>

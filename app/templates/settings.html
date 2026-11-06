@@ -3,19 +3,17 @@
 
 {% block content %}
 <div class="page">
-  <div class="section-header" style="margin-bottom: 1.5rem;">
-    <h2>Settings</h2>
-  </div>
+  <h1 class="page-title">Settings</h1>
 
   <div class="settings-card">
-    <h3>Download Configuration</h3>
+    <h2>Downloads</h2>
     <div class="field">
-      <label>Download Path</label>
-      <input type="text" value="{{ download_path }}" readonly>
+      <label for="download-path">Download path (inside the container)</label>
+      <input type="text" id="download-path" value="{{ download_path }}" readonly>
       <div class="field-hint">Set via the <code>DOWNLOAD_PATH</code> environment variable.</div>
     </div>
     <div class="field">
-      <label>Audio Format</label>
+      <label for="sel-format">Audio format</label>
       <select id="sel-format">
         {% for fmt in ["mp3", "flac", "ogg", "opus", "m4a", "wav"] %}
         <option value="{{ fmt }}" {% if audio_format == fmt %}selected{% endif %}>{{ fmt }}</option>
@@ -23,68 +21,51 @@
       </select>
       <div class="field-hint">
         YouTube audio is ~128 kbps AAC or 160 kbps Opus — that's the quality ceiling regardless of
-        format. <strong style="color:var(--text)">opus</strong> and <strong style="color:var(--text)">m4a</strong>
+        format. <strong>opus</strong> and <strong>m4a</strong>
         are the best choices: ffmpeg can remux the original stream without re-encoding, avoiding
         the generation loss of transcoding to mp3. mp3 has the widest device compatibility.
         Lossless formats (flac, wav) produce much larger files with no quality benefit.
       </div>
     </div>
     <div class="field">
-      <label>Audio Bitrate</label>
+      <label for="sel-bitrate">Audio bitrate</label>
       <select id="sel-bitrate">
         {% for br, lbl in [("auto", "auto (match source, no re-encode)"), ("128k", "128k"), ("256k", "256k"), ("320k", "320k")] %}
         <option value="{{ br }}" {% if audio_bitrate == br %}selected{% endif %}>{{ lbl }}</option>
         {% endfor %}
       </select>
       <div class="field-hint">
-        <strong style="color:var(--text)">auto</strong> keeps the original YouTube stream's bitrate
+        <strong>auto</strong> keeps the original YouTube stream's bitrate
         (no transcode — best quality/speed). A fixed bitrate re-encodes to that target; since the
         source is already ~128–160 kbps, higher values just grow the file without adding quality.
       </div>
     </div>
-    <button class="btn-save" id="btn-save-audio" onclick="saveAudio()">Save</button>
-    <span id="audio-saved" style="font-size:.8rem; color:var(--green); margin-left:.75rem; opacity:0; transition:opacity .3s">Saved</span>
-  </div>
-
-  <div class="settings-card">
-    <h3>Sync Behaviour</h3>
-    <div class="field">
-      <label class="toggle-label">
-        <span>Delete removed tracks on sync</span>
-        <label class="track-label" style="margin-left:auto">
-          <input type="checkbox" id="chk-sync-delete" class="track-checkbox"
-                 {% if sync_delete_removed %}checked{% endif %}
-                 onchange="updateSyncDelete(this.checked)">
-          <span class="track-box"></span>
-          <span class="track-text" id="sync-delete-text">{% if sync_delete_removed %}On{% else %}Off{% endif %}</span>
-        </label>
-      </label>
-      <div class="field-hint">
-        When enabled, songs removed from a Spotify playlist will also be deleted from your
-        local download folder on the next sync. When disabled (default), local files are kept
-        even if you remove the track from Spotify.
-      </div>
+    <div class="form-actions">
+      <button class="btn-primary" id="btn-save-audio" onclick="saveAudio()">Save</button>
+      <span id="audio-saved" class="save-note" role="status" aria-live="polite"></span>
     </div>
   </div>
 
   <div class="settings-card">
-    <h3>Storage</h3>
+    <h2>Storage</h2>
     <div class="storage-summary" id="storage-summary">Scanning library…</div>
     <ul class="storage-dupes" id="storage-dupes" hidden></ul>
-    <button class="btn-save" id="btn-dedupe" onclick="runDedupe()" hidden>Free up space (hardlink duplicates)</button>
-    <span id="dedupe-result" style="font-size:.8rem; color:var(--green); margin-left:.75rem;"></span>
-    <div class="field-hint" style="margin-top:.75rem">
+    <div class="form-actions">
+      <button class="btn-secondary" id="btn-dedupe" onclick="runDedupe()" hidden>Free up space (hardlink duplicates)</button>
+      <span id="dedupe-result" class="save-note" role="status" aria-live="polite"></span>
+    </div>
+    <div class="field-hint">
       The same track downloaded into several playlist folders is stored once per folder.
       Deduplicating replaces the extra copies with
-      <strong style="color:var(--text)">hardlinks</strong> — every folder keeps its file,
+      <strong>hardlinks</strong> — every folder keeps its file,
       but the audio is stored on disk only once. Requires the music folders to live on one
       filesystem (true for the default Docker volume).
     </div>
   </div>
 
   <div class="settings-card">
-    <h3>Spotify Account</h3>
-    <p style="font-size:.9rem; margin-bottom:1rem; color: var(--muted);">
+    <h2>Spotify account</h2>
+    <p class="card-text">
       Your Spotify account is connected. Disconnecting will remove the stored token
       and you'll need to log in again.
     </p>
@@ -92,9 +73,9 @@
   </div>
 
   <div class="settings-card">
-    <h3>About</h3>
-    <p style="font-size:.85rem; color: var(--muted); line-height: 1.8;">
-      <strong style="color:var(--text)">localfy</strong> uses
+    <h2>About</h2>
+    <p class="card-text">
+      <strong>localfy</strong> uses
       <a href="https://github.com/spotDL/spotify-downloader" target="_blank">spotdl</a>
       to download tracks from YouTube and tag them with Spotify metadata.<br>
       Downloads are scheduled via APScheduler and run inside this container.<br>
@@ -124,12 +105,12 @@ async function saveAudio() {
       }),
     ]);
     if (!rf.ok || !rb.ok) throw new Error();
-    saved.textContent = 'Saved'; saved.style.color = 'var(--green)';
+    saved.textContent = 'Saved. New downloads use ' + fmt + (bitrate === 'auto' ? '' : ' at ' + bitrate) + '.';
+    saved.classList.remove('is-error');
   } catch (_) {
-    saved.textContent = "Couldn't save"; saved.style.color = 'var(--red)';
+    saved.textContent = "Couldn't save. Try again.";
+    saved.classList.add('is-error');
   }
-  saved.style.opacity = '1';
-  setTimeout(() => { saved.style.opacity = '0'; }, 2500);
 }
 
 // ── Storage report + hardlink dedupe ─────────────────────────
@@ -147,11 +128,17 @@ async function loadStorage() {
     let text = `${fmtBytes(s.total_bytes)} of audio on disk.`;
     if (s.dup_files > 0) {
       text += ` ${s.dup_files} duplicate file${s.dup_files !== 1 ? 's' : ''} across playlists, wasting ${fmtBytes(s.wasted_bytes)}.`;
-      list.innerHTML = s.top.map(g =>
-        `<li><span class="sd-name"></span><span class="sd-meta">×${g.copies} · ${fmtBytes(g.size)} each · ${g.folders.join(', ')}</span></li>`
-      ).join('');
-      // Filenames/folders are untrusted text — set via textContent, not HTML.
-      list.querySelectorAll('.sd-name').forEach((el, i) => { el.textContent = s.top[i].filename; });
+      // Filenames and folder names are text from disk: build with textContent.
+      list.replaceChildren(...s.top.map(g => {
+        const li = document.createElement('li');
+        const name = document.createElement('span');
+        name.className = 'sd-name'; name.textContent = g.filename;
+        const meta = document.createElement('span');
+        meta.className = 'sd-meta';
+        meta.textContent = `×${g.copies} · ${fmtBytes(g.size)} each · ${g.folders.join(', ')}`;
+        li.append(name, meta);
+        return li;
+      }));
       if (s.group_count > s.top.length) {
         list.insertAdjacentHTML('beforeend', `<li class="sd-more">…and ${s.group_count - s.top.length} more</li>`);
       }
@@ -176,36 +163,14 @@ async function runDedupe() {
   btn.disabled = true; btn.textContent = 'Deduplicating…';
   try {
     const r = await fetch('/settings/dedupe', { method: 'POST' }).then(x => x.json());
-    result.style.color = 'var(--green)';
+    result.classList.remove('is-error');
     result.textContent = `Freed ${fmtBytes(r.saved_bytes)} (${r.linked} file${r.linked !== 1 ? 's' : ''} linked${r.failed ? ', ' + r.failed + ' failed' : ''}).`;
     loadStorage();
   } catch (_) {
-    result.style.color = 'var(--red)';
+    result.classList.add('is-error');
     result.textContent = "Couldn't deduplicate.";
   }
   btn.disabled = false; btn.textContent = 'Free up space (hardlink duplicates)';
-}
-
-async function updateSyncDelete(enabled) {
-  const checkbox = document.getElementById('chk-sync-delete');
-  const text = document.getElementById('sync-delete-text');
-  // Deleting local files is destructive — confirm before turning it on.
-  if (enabled && !confirm('Enable deleting local files when a track is removed from a Spotify playlist?\n\nThis permanently deletes audio files on the next sync.')) {
-    checkbox.checked = false;
-    return;
-  }
-  try {
-    const res = await fetch('/settings/sync-delete-removed', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'enabled=' + (enabled ? 'true' : 'false'),
-    });
-    if (!res.ok) throw new Error();
-    if (text) text.textContent = enabled ? 'On' : 'Off';
-  } catch (_) {
-    checkbox.checked = !enabled;   // revert
-    if (text) text.textContent = checkbox.checked ? 'On' : 'Off';
-  }
 }
 </script>
 {% endblock %}

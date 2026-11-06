@@ -1,12 +1,14 @@
 import asyncio
+import filecmp
 import json
+import logging
 import os
 import re
-import subprocess
 import tempfile
-import logging
+import time
 import zipfile
-from pathlib import Path
+
+from app.matching import AUDIO_EXTS, audio_files, parse_filename
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +20,6 @@ AUDIO_FORMAT = os.environ.get("AUDIO_FORMAT", "mp3")
 AUDIO_BITRATE = os.environ.get("AUDIO_BITRATE", "320k")
 
 _ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-
-AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus"}
 
 # Explicit output template (matches spotdl's default). Pinned here because
 # scan_tracks() parses "Artist - Title.ext" filenames to match local files
@@ -74,9 +74,11 @@ def _redact(cmd: list[str]) -> list[str]:
     out, hide_next = [], False
     for tok in cmd:
         if hide_next:
-            out.append("***"); hide_next = False
+            out.append("***")
+            hide_next = False
         elif tok in ("--client-secret", "--client-id"):
-            out.append(tok); hide_next = True
+            out.append(tok)
+            hide_next = True
         else:
             out.append(tok)
     return out
@@ -108,31 +110,6 @@ async def _run_async(args: list[str], on_line=None, cwd: str = None) -> tuple[in
     return proc.returncode, output
 
 
-def _sync_delete_flag() -> list[str]:
-    from app import database as db
-    if db.get_setting("sync_delete_removed", "false") == "true":
-        return []
-    return ["--sync-without-deleting"]
-
-
-# Retained (not on the active sync path — albums now go through the pre-resolved
-# meta/chunk path for failure-recovery parity with playlists). This is the only
-# implementation of the "delete removed tracks" setting, which spotdl's `sync`
-# supports but the `download` meta path does not; kept until that's ported over.
-async def sync_album(album_id: str, album_url: str, folder_name: str, on_line=None) -> tuple[int, str]:
-    sync_file = os.path.join(DATA_PATH, "sync", f"album_{album_id}.spotdl")
-    output_dir = os.path.join(DOWNLOAD_PATH, "Albums", _safe_name(folder_name))
-    os.makedirs(output_dir, exist_ok=True)
-    no_delete = _sync_delete_flag()
-
-    if os.path.exists(sync_file):
-        args = ["sync", sync_file] + no_delete + ["--output", _output(output_dir)]
-    else:
-        args = ["sync", album_url, "--save-file", sync_file] + no_delete + ["--output", _output(output_dir)]
-
-    return await _run_async(args + _NO_LYRICS, on_line=on_line)
-
-
 # Trailing `--lyrics` with no providers disables lyrics fetching (3 providers
 # spotdl hits per track that nearly always fail here, ~12s wasted each). Must be
 # last so argparse's nargs='*' consumes nothing.
@@ -160,11 +137,6 @@ async def download_from_meta(songs: list[dict], output_dir: str, on_line=None) -
             os.remove(path)
         except OSError:
             pass
-
-
-async def download_single_track(spotify_url: str, output_dir: str, on_line=None) -> tuple[int, str]:
-    os.makedirs(output_dir, exist_ok=True)
-    return await _run_async(["download", spotify_url, "--output", _output(output_dir)] + _NO_LYRICS, on_line=on_line)
 
 
 async def download_youtube(youtube_url: str, spotify_url: str, output_dir: str, on_line=None) -> tuple[int, str]:
@@ -233,6 +205,19 @@ def dir_size(path: str = None) -> int:
     return total
 
 
+_size_cache: tuple[float, int] | None = None
+
+
+def dir_size_cached(max_age: float = 60.0) -> int:
+    """dir_size() of the whole library, recomputed at most once a minute: the
+    dashboard asks on every render and a big library is a long walk."""
+    global _size_cache
+    now = time.monotonic()
+    if _size_cache is None or now - _size_cache[0] > max_age:
+        _size_cache = (now, dir_size())
+    return _size_cache[1]
+
+
 def _duplicate_groups() -> list[tuple[int, list[tuple[str, int]]]]:
     """Audio files stored more than once: groups of identical (filename, size)
     across folders, as (size, [(path, inode)]). Inode-aware, so copies that are
@@ -288,6 +273,14 @@ def dedupe_hardlinks() -> dict:
         for p, ino in entries[1:]:
             if ino == can_ino:
                 continue
+            # Same name and size is only a candidate; never replace a file with
+            # a link to different audio.
+            try:
+                identical = filecmp.cmp(canonical, p, shallow=False)
+            except OSError:
+                identical = False
+            if not identical:
+                continue
             tmp = p + ".lfy-dedupe-tmp"
             try:
                 os.link(canonical, tmp)
@@ -317,18 +310,10 @@ def music_dir(target: dict) -> str:
 
 def scan_tracks(target: dict) -> list[dict]:
     """Return list of {filename, title, artist} for all audio files in target's folder."""
-    folder = music_dir(target)
-    if not os.path.isdir(folder):
-        return []
     tracks = []
-    for fname in sorted(os.listdir(folder)):
-        if os.path.splitext(fname)[1].lower() in AUDIO_EXTS:
-            stem = os.path.splitext(fname)[0]
-            if " - " in stem:
-                artist, title = stem.split(" - ", 1)
-            else:
-                artist, title = "", stem
-            tracks.append({"filename": fname, "title": title.strip(), "artist": artist.strip()})
+    for fname in audio_files(music_dir(target)):
+        artist, title = parse_filename(fname)
+        tracks.append({"filename": fname, "title": title, "artist": artist})
     return tracks
 
 

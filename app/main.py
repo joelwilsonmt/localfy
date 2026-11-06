@@ -3,97 +3,128 @@ import datetime
 import logging
 import os
 import re
+import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse, Response
+from fastapi import BackgroundTasks, FastAPI, Form, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 from app import database as db
+from app import matching
 from app import scheduler as sched
-from app.auth import is_authenticated, router as auth_router
+from app import status
+from app.auth import is_authenticated
+from app.auth import router as auth_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
 
-_RE_FEAT = re.compile(r'\s*[\(\[]\s*(?:feat|ft|featuring)[.\s][^\)\]]*[\)\]]', re.IGNORECASE)
-_RE_NONWORD = re.compile(r'[^\w\s]')
-_RE_WS = re.compile(r'\s+')
+# Pages render from what's in the DB and refresh it from Spotify in the
+# background once it's older than this (stale-while-revalidate), so a page view
+# never waits on Spotify except the very first time.
+LIBRARY_TTL = datetime.timedelta(minutes=5)
+TRACKS_TTL = datetime.timedelta(minutes=15)
+
+_RE_SPOTIFY_ID = re.compile(r'[A-Za-z0-9]{22}')
 
 
-def _norm(s: str) -> str:
-    s = _RE_FEAT.sub('', s)
-    s = _RE_NONWORD.sub('', s.lower())
-    return _RE_WS.sub(' ', s).strip()
+def _stale(ts: str | None, ttl: datetime.timedelta) -> bool:
+    dt = status.parse_ts(ts)
+    return dt is None or datetime.datetime.now(datetime.timezone.utc) - dt > ttl
 
 
-def _merge_tracks(spotify_tracks: list[dict], local_tracks: list[dict]) -> list[dict]:
-    """Annotate each Spotify track with whether it's been downloaded locally."""
-    by_full = {}
-    by_title = {}
-    for lt in local_tracks:
-        stem = f"{lt['artist']} - {lt['title']}" if lt["artist"] else lt["title"]
-        by_full[_norm(stem)] = lt
-        by_title.setdefault(_norm(lt["title"]), []).append(lt)
-
-    result = []
-    for st in spotify_tracks:
-        local = by_full.get(_norm(f"{st['artist']} - {st['name']}"))
-        if local is None:
-            # Title-only fallback for artist-list mismatches (the filename holds
-            # spotdl's joined {artists}; Spotify's side may be primary-only, e.g.
-            # liked songs) — but the artists must still agree on whole tokens, so
-            # a same-titled track by a different artist isn't shown as downloaded
-            # and wired to play that other artist's file.
-            st_tokens = set(_norm(st["artist"]).split())
-            for lt in by_title.get(_norm(st["name"]), []):
-                lt_tokens = set(_norm(lt["artist"]).split())
-                if (st_tokens and lt_tokens and (st_tokens <= lt_tokens or lt_tokens <= st_tokens)) \
-                        or (not st_tokens and not lt_tokens):
-                    local = lt
-                    break
-        result.append({**st, "downloaded": local is not None, "filename": local["filename"] if local else None})
-    return result
+_refreshing: set[str] = set()
+_refresh_lock = threading.Lock()
 
 
-def _spotify_tracks_for(target: dict) -> list[dict]:
-    """Fetch a target's tracks in Spotify order (playlist/album/liked)."""
+def _refresh_once(key: str, fn, *args):
+    """Run a background refresh unless one for the same key is already running."""
+    with _refresh_lock:
+        if key in _refreshing:
+            return
+        _refreshing.add(key)
+    try:
+        fn(*args)
+    except Exception:
+        logger.exception("Background refresh %s failed", key)
+    finally:
+        with _refresh_lock:
+            _refreshing.discard(key)
+
+
+def _refresh_library():
+    """Pull the user's liked songs / playlists / saved albums into sync_targets."""
     from app import spotify
-    tid = target["id"]
-    if target["type"] == "playlist":
-        return spotify.get_playlist_tracks(tid)
-    elif target["type"] == "album":
-        return spotify.get_album_tracks(tid)
-    elif target["type"] == "singles":
-        # One-off downloads have no Spotify-side collection; callers fall back
-        # to the local file list.
-        raise LookupError("singles have no Spotify track list")
-    raw = spotify.get_liked_track_ids()  # liked_songs
-    return [{"id": t, "name": name, "artist": artist,
-             "spotify_url": f"https://open.spotify.com/track/{t}", "duration_ms": 0}
-            for t, name, artist in raw]
+    items = [spotify.get_liked_songs_info()] + spotify.get_user_playlists() + spotify.get_saved_albums()
+    for item in items:
+        db.upsert_target(id=item["id"], type=item["type"], name=item["name"],
+                         spotify_url=item["spotify_url"], image_url=item.get("image_url"),
+                         track_count=item.get("track_count"))
+    db.set_setting("library_refreshed_at", datetime.datetime.now(datetime.timezone.utc).isoformat())
+
+
+def _refresh_tracks(target: dict):
+    """Re-fetch a target's Spotify track list into its snapshot."""
+    from app import spotify
+    db.replace_target_tracks(target["id"], spotify.get_target_song_meta(target))
+
+
+def _track_rows(target: dict, background_tasks: BackgroundTasks
+                ) -> tuple[list[dict] | None, str | None, int | None]:
+    """(snapshot rows, Spotify error, its HTTP status) for a target. Fetches live
+    only when there's no snapshot yet; otherwise serves it and refreshes in the
+    background if stale."""
+    if target["type"] == "singles":
+        return None, None, None   # local-only collection by design — no Spotify side
+    if target.get("tracks_fetched_at") is None:
+        try:
+            _refresh_tracks(target)
+        except Exception as exc:
+            logger.exception("Failed to fetch Spotify tracks for %s", target["id"])
+            return None, str(exc), getattr(exc, "http_status", None)
+    elif _stale(target["tracks_fetched_at"], TRACKS_TTL):
+        background_tasks.add_task(_refresh_once, f"tracks:{target['id']}", _refresh_tracks, target)
+    return db.get_target_tracks(target["id"]), None, None
+
+
+def _merge_tracks(rows: list[dict], local_tracks: list[dict]) -> list[dict]:
+    """Annotate each snapshot row with the local file it was downloaded to, if any."""
+    idx = matching.build_index([lt["filename"] for lt in local_tracks])
+    out = []
+    for r in rows:
+        fn = matching.find(idx, r["name"], r["primary_artist"], [r["artist"]])
+        out.append({"id": r["spotify_id"], "name": r["name"], "artist": r["artist"],
+                    "downloaded": fn is not None, "filename": fn})
+    return out
+
+
+def _downloaded_count(target: dict, rows: list[dict]) -> int:
+    """How many of a target's tracks are on disk. Counted against its snapshot
+    rows when there are some, so files for tracks since removed from the
+    playlist don't push it past the total ("187 of 176")."""
+    from app.downloader import music_dir
+    files = matching.audio_files(music_dir(target))
+    if not rows:
+        # No track list yet (not synced or opened since upgrading): a file
+        # count is the best guess, but never claim more than the total.
+        return min(len(files), target.get("track_count") or len(files))
+    idx = matching.build_index(files)
+    return sum(1 for r in rows if matching.find(idx, r["name"], r["primary_artist"], [r["artist"]]))
 
 
 def _ordered_local_tracks(target: dict) -> list[dict]:
-    """Downloaded tracks shaped for the player, in Spotify playlist order.
-
-    Falls back to filesystem (alphabetical) order if the Spotify lookup fails,
-    so the dashboard play button matches the detail page rather than whatever
-    sorts first by filename.
-    """
+    """Downloaded tracks shaped for the player, in Spotify order (from the
+    snapshot — no Spotify call). Falls back to filename order without one."""
     from app.downloader import scan_tracks
     local = scan_tracks(target)
-    try:
-        spotify_tracks = _spotify_tracks_for(target)
-    except Exception:
-        logger.exception("Spotify order unavailable for %s; using filename order", target["id"])
-        return local
+    rows = db.get_target_tracks(target["id"])
     ordered = [{"filename": m["filename"], "title": m["name"], "artist": m["artist"]}
-               for m in _merge_tracks(spotify_tracks, local) if m["downloaded"]]
+               for m in _merge_tracks(rows, local) if m["downloaded"]]
     return ordered or local
 
 
@@ -137,17 +168,26 @@ async def lifespan(app: FastAPI):
     for tid in db.reconcile_running_logs():
         prog.set_progress(tid, {"status": "interrupted",
                                 "message": "A sync was interrupted by a restart"})
-    sched.load_all_jobs()
-    sched.scheduler.start()
+    if sched.DISABLED:
+        logger.warning("Scheduler disabled (LOCALFY_DISABLE_SCHEDULER); only manual syncs will run")
+    else:
+        sched.load_all_jobs()
+        sched.scheduler.start()
     logger.info("Localfy started")
     yield
-    sched.scheduler.shutdown(wait=False)
+    if sched.scheduler.running:
+        sched.scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="Localfy", lifespan=lifespan)
 app.include_router(auth_router)
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 
 def _require_auth(request: Request):
@@ -168,53 +208,41 @@ def index(request: Request, error: str = None):
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(request: Request):
+def dashboard(request: Request, background_tasks: BackgroundTasks, refresh: bool = False):
     if redir := _require_auth(request):
         return redir
-    from app import spotify
-    try:
-        playlists = spotify.get_user_playlists()
-        liked = spotify.get_liked_songs_info()
-        albums = spotify.get_saved_albums()
-        all_items = [liked] + playlists + albums
-    except Exception as e:
-        logger.exception("Failed to fetch Spotify data")
-        return templates.TemplateResponse(request, "dashboard.html", {
-            "error": str(e), "items": [], "db_targets": {}, "local_counts": {},
-            "syncing": set(), "failed_counts": {}, "stats": db.get_library_stats(),
-        })
+    error = None
+    refreshed_at = db.get_setting("library_refreshed_at")
+    if refresh or refreshed_at is None:
+        try:
+            _refresh_library()
+        except Exception as e:
+            logger.exception("Failed to fetch Spotify data")
+            error = str(e)
+    elif _stale(refreshed_at, LIBRARY_TTL):
+        background_tasks.add_task(_refresh_once, "library", _refresh_library)
 
-    for item in all_items:
-        db.upsert_target(
-            id=item["id"], type=item["type"], name=item["name"],
-            spotify_url=item["spotify_url"], image_url=item.get("image_url"),
-        )
-
+    # Everything renders from the DB: the user's library plus any targets added
+    # by URL (or since unfollowed), so they keep their sync controls.
     db_targets = {t["id"]: t for t in db.get_all_targets()}
+    if error and any(t["type"] in ("playlist", "album", "liked_songs") for t in db_targets.values()):
+        error = f"Couldn't refresh from Spotify ({error}). Showing your library as of the last refresh."
 
-    # Include targets added by URL that aren't in the user's own library, so they
-    # render with sync controls like the rest.
-    live_ids = {item["id"] for item in all_items}
-    for tid, t in db_targets.items():
-        if tid in live_ids or t["type"] not in ("playlist", "album"):
-            continue
-        item = {"id": tid, "name": t["name"], "spotify_url": t.get("spotify_url"),
-                "track_count": t.get("track_count"), "image_url": t.get("image_url"),
-                "type": t["type"]}
-        (playlists if t["type"] == "playlist" else albums).append(item)
-
-    from app.downloader import scan_tracks
     local_counts = {}
+    snapshots = db.get_all_target_tracks()
     for tid, t in db_targets.items():
         if t.get("last_synced") or t.get("enabled"):
             try:
-                local_counts[tid] = len(scan_tracks(t))
+                local_counts[tid] = _downloaded_count(t, snapshots.get(tid, []))
             except Exception:
+                logger.exception("Couldn't count downloads for %s", tid)
                 local_counts[tid] = 0
 
-    playlists.sort(key=lambda x: _item_sort_key(x, db_targets, local_counts))
-    albums.sort(key=lambda x: _item_sort_key(x, db_targets, local_counts))
-    all_items = [liked] + playlists + albums
+    def of_type(kind):
+        return sorted((t for t in db_targets.values() if t["type"] == kind),
+                      key=lambda x: _item_sort_key(x, db_targets, local_counts))
+
+    all_items = of_type("liked_songs") + of_type("playlist") + of_type("album")
 
     # Targets whose sync is in progress right now, so the card can render its
     # "Syncing…" state on first paint instead of relying on a client-side poll
@@ -223,18 +251,29 @@ def dashboard(request: Request):
     syncing = {item["id"] for item in all_items
                if prog.get_progress(item["id"]).get("status") == "running"}
 
+    # "Synced" leads the page: anything auto-syncing, syncing now, or with
+    # files on disk. The rest of the Spotify library sits in a collapsed section.
+    def is_synced(t):
+        return bool(t.get("enabled")) or local_counts.get(t["id"], 0) > 0 or t["id"] in syncing
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    sync_status = {t["id"]: status.sync_status(t, sched.interval_for(t.get("schedule") or "daily"), now)
+                   for t in all_items if is_synced(t)}
+
     return templates.TemplateResponse(request, "dashboard.html", {
-        "items": all_items, "db_targets": db_targets,
-        "local_counts": local_counts, "syncing": syncing,
+        "synced_items": [t for t in all_items if is_synced(t)],
+        "library_items": [t for t in all_items if not is_synced(t)],
+        "local_counts": local_counts, "syncing": syncing, "sync_status": sync_status,
+        "overdue_count": sum(1 for st in sync_status.values() if st["overdue"]),
         "failed_counts": db.get_failed_counts(), "stats": db.get_library_stats(),
-        "error": None,
+        "error": error,
     })
 
 
 # ── Target detail ─────────────────────────────────────────────────────────────
 
 @app.get("/targets/{target_id}", response_class=HTMLResponse)
-def target_detail(target_id: str, request: Request):
+def target_detail(target_id: str, request: Request, background_tasks: BackgroundTasks):
     if redir := _require_auth(request):
         return redir
     target = db.get_target(target_id)
@@ -243,31 +282,25 @@ def target_detail(target_id: str, request: Request):
 
     from app.downloader import scan_tracks
     local_tracks = scan_tracks(target)
+    rows, spotify_error, spotify_status = _track_rows(target, background_tasks)
 
-    if target["type"] == "singles":
-        # Local-only collection by design — not an error, just no Spotify side.
-        spotify_tracks, spotify_error = None, None
-    else:
-        try:
-            spotify_tracks = _spotify_tracks_for(target)
-        except Exception as exc:
-            logger.exception("Failed to fetch Spotify tracks for %s", target_id)
-            spotify_tracks = None
-            spotify_error = str(exc)
-        else:
-            spotify_error = None
-
-    if spotify_tracks is not None:
-        tracks = _merge_tracks(spotify_tracks, local_tracks)
+    if rows is not None:
+        tracks = _merge_tracks(rows, local_tracks)
     else:
         tracks = [{"id": None, "name": lt["title"], "artist": lt["artist"],
-                   "spotify_url": None, "duration_ms": 0,
                    "downloaded": True, "filename": lt["filename"]}
                   for lt in local_tracks]
 
+    # Spotify refuses to share some playlists' tracks with third-party apps
+    # (Spotify-made mixes and editorial lists). A sync makes the same call, so
+    # it can't help — the page says so instead of offering a sync that fails.
+    blocked = spotify_status in (403, 404)
+
+    last = status.parse_ts(target.get("last_synced"))
     return templates.TemplateResponse(request, "detail.html", {
         "target": target, "tracks": tracks, "spotify_error": spotify_error,
-        "failed": db.get_failed_tracks(target_id),
+        "last_synced_ago": status.ago(last, datetime.datetime.now(datetime.timezone.utc)) if last else None,
+        "spotify_blocked": blocked, "failed": db.get_failed_tracks(target_id),
     })
 
 
@@ -296,15 +329,18 @@ def local_tracks_json(target_id: str, request: Request):
 
 @app.get("/targets/{target_id}/scan")
 def scan_local(target_id: str, request: Request):
-    """Filesystem-only list of downloaded files — cheap to poll during a sync so
-    the detail page can flip rows to playable live (no Spotify call)."""
+    """Downloaded files plus which snapshot tracks they match — cheap to poll
+    during a sync so the detail page can flip rows to playable live."""
     if redir := _require_auth(request):
         return redir
     target = db.get_target(target_id)
     if not target:
         return JSONResponse({"error": "not found"}, status_code=404)
     from app.downloader import scan_tracks
-    return JSONResponse({"tracks": scan_tracks(target)})
+    files = scan_tracks(target)
+    matches = {m["id"]: m["filename"] for m in _merge_tracks(db.get_target_tracks(target_id), files)
+               if m["downloaded"]}
+    return JSONResponse({"tracks": files, "matches": matches})
 
 
 @app.get("/stream/{target_id}/{filename:path}")
@@ -350,6 +386,25 @@ def download_zip(target_id: str, request: Request):
 
 # ── Single track download ──────────────────────────────────────────────────────
 
+def _spawn_download(target: dict, track_id: str, song: dict | None = None):
+    """Download one track into a target's folder in the background, reporting
+    through the per-track status the UI polls. Fetches the track's metadata
+    first when it isn't given."""
+    async def _do():
+        from app import progress as prog
+        from app import spotify
+        prog.set_track(track_id, "running", "")
+        try:
+            meta = song or await asyncio.to_thread(spotify.get_track_song_meta, track_id)
+            landed, reason = await sched.download_one(target, meta)
+            prog.set_track(track_id, "done" if landed else "error", reason)
+        except Exception:
+            logger.exception("Track download failed for %s", track_id)
+            prog.set_track(track_id, "error", "Download failed")
+
+    sched.spawn(_do())
+
+
 @app.post("/targets/{target_id}/tracks/{track_id}/download")
 async def download_track(target_id: str, track_id: str, request: Request):
     if redir := _require_auth(request):
@@ -357,19 +412,9 @@ async def download_track(target_id: str, track_id: str, request: Request):
     target = db.get_target(target_id)
     if not target:
         return JSONResponse({"error": "not found"}, status_code=404)
-
-    async def _do():
-        from app import progress as prog
-        from app.downloader import download_single_track, music_dir
-        prog.set_track(track_id, "running")
-        try:
-            url = f"https://open.spotify.com/track/{track_id}"
-            code, _ = await download_single_track(url, music_dir(target))
-            prog.set_track(track_id, "done" if code == 0 else "error")
-        except Exception:
-            prog.set_track(track_id, "error")
-
-    asyncio.create_task(_do())
+    if not _RE_SPOTIFY_ID.fullmatch(track_id):
+        return JSONResponse({"error": "invalid track id"}, status_code=400)
+    _spawn_download(target, track_id)
     return JSONResponse({"status": "started"})
 
 
@@ -384,13 +429,18 @@ def track_status(target_id: str, track_id: str, request: Request):
 # ── Toggle enable/disable ─────────────────────────────────────────────────────
 
 @app.post("/targets/{target_id}/toggle")
-def toggle_target(target_id: str, request: Request):
+def toggle_target(target_id: str, request: Request, enabled: str | None = Form(None)):
+    """Set tracking on/off. Pass enabled=true|false to set it explicitly
+    (idempotent — safe to repeat); without it, flips the current state."""
     if redir := _require_auth(request):
         return redir
     target = db.get_target(target_id)
     if not target:
         return JSONResponse({"error": "not found"}, status_code=404)
-    new_enabled = not bool(target["enabled"])
+    if enabled in ("true", "false"):
+        new_enabled = enabled == "true"
+    else:
+        new_enabled = not bool(target["enabled"])
     db.set_target_enabled(target_id, new_enabled)
     if new_enabled:
         sched.register_target(target_id, target["schedule"])
@@ -407,9 +457,11 @@ def update_schedule(target_id: str, request: Request, schedule: str = Form(...))
         return redir
     if schedule not in ("daily", "weekly", "monthly"):
         return JSONResponse({"error": "invalid schedule"}, status_code=400)
-    db.set_target_schedule(target_id, schedule)
     target = db.get_target(target_id)
-    if target and target["enabled"]:
+    if not target:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    db.set_target_schedule(target_id, schedule)
+    if target["enabled"]:
         sched.register_target(target_id, schedule)
     return JSONResponse({"ok": True, "schedule": schedule})
 
@@ -433,7 +485,7 @@ async def manual_sync(target_id: str, request: Request):
         "status": "running", "downloaded": 0, "skipped": 0,
         "total": target.get("track_count") or 0,
     })
-    asyncio.create_task(sched._run_sync(target_id, force=True))
+    sched.spawn(sched._run_sync(target_id, force=True))
     return JSONResponse({"status": "started"})
 
 
@@ -459,7 +511,8 @@ def get_logs(target_id: str, request: Request):
 
 # ── Add target by URL ─────────────────────────────────────────────────────────
 
-_RE_SPOTIFY_URL = re.compile(r'open\.spotify\.com/(playlist|album)/([A-Za-z0-9]+)')
+# Also accepts localized share links (open.spotify.com/intl-de/playlist/…).
+_RE_SPOTIFY_URL = re.compile(r'open\.spotify\.com/(?:intl-[\w-]+/)?(playlist|album)/([A-Za-z0-9]+)')
 
 
 @app.post("/targets/add")
@@ -472,13 +525,14 @@ async def add_target(request: Request, url: str = Form(...)):
     kind, sid = m.group(1), m.group(2)
     from app import spotify
     try:
-        info = spotify.get_playlist_info(sid) if kind == "playlist" else spotify.get_album_info(sid)
+        fetch = spotify.get_playlist_info if kind == "playlist" else spotify.get_album_info
+        info = await asyncio.to_thread(fetch, sid)
     except Exception as e:
         logger.exception("add_target failed")
         return JSONResponse({"error": f"Couldn't load that {kind}: {e}"}, status_code=400)
     db.upsert_target(id=info["id"], type=info["type"], name=info["name"],
-                     spotify_url=info["spotify_url"], image_url=info.get("image_url"))
-    db.set_target_track_count(info["id"], info.get("track_count") or 0)
+                     spotify_url=info["spotify_url"], image_url=info.get("image_url"),
+                     track_count=info.get("track_count") or 0)
     db.set_target_enabled(info["id"], True)
     sched.register_target(info["id"], db.get_target(info["id"])["schedule"])
     # register_target seeds next_run at now+interval for a target with no prior
@@ -489,7 +543,7 @@ async def add_target(request: Request, url: str = Form(...)):
         "status": "running", "downloaded": 0, "skipped": 0,
         "total": info.get("track_count") or 0,
     })
-    asyncio.create_task(sched._run_sync(info["id"], force=True))
+    sched.spawn(sched._run_sync(info["id"], force=True))
     return JSONResponse({"ok": True, "id": info["id"], "name": info["name"], "type": info["type"]})
 
 
@@ -517,11 +571,23 @@ async def retry_failed_route(target_id: str, request: Request):
     from app import progress as prog
     prog.set_progress(target_id, {"status": "running", "mode": "retry", "current": None,
                                   "downloaded": 0, "done": 0, "total": len(failed)})
-    asyncio.create_task(sched._retry_failed(target_id))
+    sched.spawn(sched._retry_failed(target_id))
     return JSONResponse({"status": "started", "total": len(failed)})
 
 
-_RE_YOUTUBE = re.compile(r'(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)[\w-]+')
+# The whole input must be a YouTube video link. Only the 11-char video id is
+# kept and a canonical URL rebuilt from it, so nothing else the user typed
+# (extra text, a leading "-", a "|") ever reaches spotdl's argv.
+_RE_YOUTUBE = re.compile(
+    r'(?:https?://)?(?:(?:www|m|music)\.)?'
+    r'(?:youtube\.com/(?:watch\?(?:[^#\s]*&)?v=|shorts/|embed/|live/)|youtu\.be/)'
+    r'([\w-]{11})(?:[?&#]\S*)?'
+)
+
+
+def youtube_video_url(url: str | None) -> str | None:
+    m = _RE_YOUTUBE.fullmatch((url or "").strip())
+    return f"https://www.youtube.com/watch?v={m.group(1)}" if m else None
 
 
 @app.post("/targets/{target_id}/tracks/{track_id}/youtube")
@@ -531,24 +597,38 @@ async def youtube_download_route(target_id: str, track_id: str, request: Request
     target = db.get_target(target_id)
     if not target:
         return JSONResponse({"error": "not found"}, status_code=404)
-    if not _RE_YOUTUBE.search(url or ""):
-        return JSONResponse({"error": "That doesn't look like a YouTube link."}, status_code=400)
+    if not _RE_SPOTIFY_ID.fullmatch(track_id):
+        return JSONResponse({"error": "invalid track id"}, status_code=400)
+    video_url = youtube_video_url(url)
+    if not video_url:
+        return JSONResponse({"error": "That doesn't look like a YouTube video link."}, status_code=400)
 
     async def _do():
         from app import progress as prog
-        from app.downloader import download_youtube, music_dir, classify_failure
-        prog.set_track(track_id, "running")
+        from app.downloader import classify_failure, download_youtube, music_dir
+        prog.set_track(track_id, "running", "")
         try:
+            folder = music_dir(target)
+            before = set(matching.audio_files(folder))
             spotify_url = f"https://open.spotify.com/track/{track_id}"
-            code, output = await download_youtube(url, spotify_url, music_dir(target))
+            code, output = await download_youtube(video_url, spotify_url, folder)
             # spotdl exits 0 even when the video is unavailable/age-restricted and
             # no file is written, so confirm the track is actually on disk before
             # marking it downloaded — otherwise it silently vanishes from the retry UI.
+            # Name/artist come from the failed-track row, else the track list;
+            # with neither, a new audio file appearing is the evidence.
             f = next((x for x in db.get_failed_tracks(target_id) if x["spotify_id"] == track_id), None)
-            song = {"name": f["name"], "artist": f["artist"], "artists": [f["artist"]]} if f else None
-            landed = code == 0 and (song is None or sched.track_on_disk(music_dir(target), song))
+            if f is None:
+                f = next(({"name": r["name"], "artist": r["primary_artist"]}
+                          for r in db.get_target_tracks(target_id) if r["spotify_id"] == track_id), None)
+            if f:
+                song = {"song_id": track_id, "name": f["name"], "artist": f["artist"], "artists": [f["artist"]]}
+                landed = sched.track_on_disk(folder, song)
+            else:
+                song = {"song_id": track_id, "name": "", "artist": ""}
+                landed = bool(set(matching.audio_files(folder)) - before)
             if landed:
-                db.mark_downloaded(track_id, f["name"] if f else "", f["artist"] if f else "", target_id)
+                db.mark_downloaded_many(target_id, [song])
                 db.remove_failed_track(target_id, track_id)
                 prog.set_track(track_id, "done")
             else:
@@ -559,7 +639,7 @@ async def youtube_download_route(target_id: str, track_id: str, request: Request
             logger.exception("YouTube download failed for %s", track_id)
             prog.set_track(track_id, "error", "Download failed")
 
-    asyncio.create_task(_do())
+    sched.spawn(_do())
     return JSONResponse({"status": "started"})
 
 
@@ -587,33 +667,16 @@ async def download_single(request: Request, track_id: str = Form(...)):
     searchable, streamable, and listed at /targets/singles."""
     if redir := _require_auth(request):
         return redir
+    if not _RE_SPOTIFY_ID.fullmatch(track_id):
+        return JSONResponse({"error": "invalid track id"}, status_code=400)
     from app import spotify
     try:
-        song = spotify.get_track_song_meta(track_id)
+        song = await asyncio.to_thread(spotify.get_track_song_meta, track_id)
     except Exception as e:
         return JSONResponse({"error": f"Couldn't load that track: {e}"}, status_code=400)
     db.upsert_target(id="singles", type="singles", name="Singles",
                      spotify_url=None, image_url=None)
-    target = db.get_target("singles")
-
-    async def _do():
-        from app import progress as prog
-        from app.downloader import download_from_meta, music_dir, classify_failure
-        prog.set_track(track_id, "running")
-        try:
-            out_dir = music_dir(target)
-            code, output = await download_from_meta([song], out_dir)
-            if sched.track_on_disk(out_dir, song):
-                db.mark_downloaded(track_id, song["name"], song["artist"], "singles")
-                prog.set_track(track_id, "done")
-            else:
-                reason = classify_failure(output) if code != 0 else "Download finished but no file appeared"
-                prog.set_track(track_id, "error", reason)
-        except Exception:
-            logger.exception("Single download failed for %s", track_id)
-            prog.set_track(track_id, "error", "Download failed")
-
-    asyncio.create_task(_do())
+    _spawn_download(db.get_target("singles"), track_id, song)
     return JSONResponse({"status": "started"})
 
 
@@ -623,10 +686,9 @@ async def download_single(request: Request, track_id: str = Form(...)):
 def api_stats(request: Request):
     if redir := _require_auth(request):
         return redir
-    from app.downloader import dir_size
-    stats = db.get_library_stats()
-    stats["disk_bytes"] = dir_size()
-    return JSONResponse(stats)
+    # The page already renders the DB stats; this only adds the (slow) disk size.
+    from app.downloader import dir_size_cached
+    return JSONResponse({"disk_bytes": dir_size_cached()})
 
 
 @app.get("/api/queue")
@@ -649,34 +711,31 @@ def api_search(request: Request, q: str = ""):
     q = (q or "").strip()
     if len(q) < 2:
         return JSONResponse({"results": []})
-    from app.downloader import scan_tracks
+    from app.downloader import music_dir
     rows = db.search_downloaded(q, limit=120)
     targets_cache: dict = {}
-    folder_cache: dict = {}
+    index_cache: dict = {}
+    seen: set[str] = set()
     results = []
     for r in rows:
+        # A track in several playlists has a row per playlist; show it once.
+        if r["spotify_id"] in seen:
+            continue
         tid = r["target_id"]
         if tid not in targets_cache:
             targets_cache[tid] = db.get_target(tid)
         target = targets_cache[tid]
         if not target:
             continue
-        if tid not in folder_cache:
-            # Keyed by title; the filename artist is spotdl's joined {artists}
-            # while the DB stores the primary artist only, so exact-key matching
-            # would silently drop every multi-artist track from search results.
-            cache: dict = {}
-            for t in scan_tracks(target):
-                cache.setdefault(_norm(t["title"]), []).append(
-                    (set(_norm(t["artist"]).split()), t["filename"]))
-            folder_cache[tid] = cache
-        r_tokens = set(_norm(r["artist"]).split())
-        fn = next((f for toks, f in folder_cache[tid].get(_norm(r["name"]), [])
-                   if r_tokens <= toks or (not toks and not r_tokens)), None)
+        if tid not in index_cache:
+            index_cache[tid] = matching.index_dir(music_dir(target))
+        fn = matching.find(index_cache[tid], r["name"], r["artist"])
         if not fn:
             continue
+        seen.add(r["spotify_id"])
         results.append({"title": r["name"], "artist": r["artist"], "filename": fn,
-                        "target_id": tid, "target_name": target["name"]})
+                        "target_id": tid, "target_name": target["name"],
+                        "image_url": target.get("image_url")})
         if len(results) >= 50:
             break
     return JSONResponse({"results": results})
@@ -692,16 +751,7 @@ def settings(request: Request):
         "download_path": os.environ.get("DOWNLOAD_PATH", "/music"),
         "audio_format": db.get_setting("audio_format") or os.environ.get("AUDIO_FORMAT", "mp3"),
         "audio_bitrate": db.get_setting("audio_bitrate") or os.environ.get("AUDIO_BITRATE", "320k"),
-        "sync_delete_removed": db.get_setting("sync_delete_removed", "false") == "true",
     })
-
-
-@app.post("/settings/sync-delete-removed")
-def update_sync_delete(request: Request, enabled: str = Form(...)):
-    if redir := _require_auth(request):
-        return redir
-    db.set_setting("sync_delete_removed", "true" if enabled == "true" else "false")
-    return JSONResponse({"ok": True, "sync_delete_removed": enabled == "true"})
 
 
 @app.post("/settings/audio-format")

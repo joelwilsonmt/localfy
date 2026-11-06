@@ -14,7 +14,12 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
 
 # OS / editor
 .DS_Store
 *.swp
+
+# Local design-tool state (impeccable hook cache, critique archive)
+.impeccable/

@@ -3,18 +3,38 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+
+from app import matching, status
 
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
+
+# Dev/maintenance switch: run the web app without scheduled syncs (manual syncs
+# from the UI still work).
+DISABLED = os.environ.get("LOCALFY_DISABLE_SCHEDULER", "").lower() in ("1", "true", "yes")
 
 _INTERVALS = {
     "daily": dict(days=1),
     "weekly": dict(weeks=1),
     "monthly": dict(days=30),
 }
+
+# ── Background tasks ───────────────────────────────────────────────────────────
+# The event loop only keeps weak references to tasks, so a fire-and-forget
+# asyncio.create_task() can be garbage-collected mid-run. Hold them here until done.
+_background: set[asyncio.Task] = set()
+
+
+def spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return task
+
 
 # ── Concurrency control ────────────────────────────────────────────────────────
 # Targets currently being synced, so a duplicate (double-click, or a scheduled
@@ -57,71 +77,31 @@ _RE_DOWNLOADED = re.compile(r'Downloaded "([^"]+)"')
 # and avoid the mass rate-limiting that stalls one giant 200-URL call.
 _CHUNK = 10
 
-_RE_NONWORD = re.compile(r'[^\w\s]')
-_AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus"}
-
-
-def _norm(s: str) -> str:
-    return _RE_NONWORD.sub('', (s or '').lower()).strip()
-
-
-def _present_index(output_dir: str) -> dict[str, list[tuple[str, str]]]:
-    """Map normalized title → [(normalized artist, filename)] for files on disk."""
-    idx: dict[str, list[tuple[str, str]]] = {}
-    try:
-        names = os.listdir(output_dir)
-    except OSError:
-        return idx
-    for fname in names:
-        if os.path.splitext(fname)[1].lower() not in _AUDIO_EXTS:
-            continue
-        stem = os.path.splitext(fname)[0]
-        artist, title = stem.split(" - ", 1) if " - " in stem else ("", stem)
-        idx.setdefault(_norm(title), []).append((_norm(artist), fname))
-    return idx
-
-
-def _match_file(idx: dict[str, list[tuple[str, str]]], song: dict) -> str | None:
-    """The on-disk filename for this song, or None. Requires a title match AND
-    whole-word artist agreement.
-
-    Title alone would falsely match a different artist's same-titled track (covers,
-    "Intro", "Interlude") and permanently mark it downloaded. The on-disk artist is
-    spotdl's joined `{artists}`, so we match on whole tokens: either the song's
-    primary-artist words all appear in the filename's artist words, or the file's
-    artist words are all among the song's artists (multi-artist files, any order).
-
-    Whole-token comparison — not substring — avoids "sia" spuriously matching
-    "siavash". An artist-less song only matches an artist-less file (never a known
-    artist against an unknown one), so a metadata-poor "Intro" can't hijack a
-    same-titled track that happens to already be on disk.
-    """
-    entries = idx.get(_norm(song.get("name", "")))
-    if entries is None:
-        return None
-    primary_tokens = set(_norm(song.get("artist", "")).split())
-    full_tokens = set(_norm(" ".join(song.get("artists") or [song.get("artist", "")])).split())
-    for fa, fname in entries:
-        fa_tokens = set(fa.split())
-        if not fa_tokens or not primary_tokens:
-            if not fa_tokens and not primary_tokens:
-                return fname   # both artist-less; the title match is all there is
-            continue
-        if primary_tokens <= fa_tokens or fa_tokens <= full_tokens:
-            return fname
-    return None
-
-
-def _song_present(idx: dict[str, list[tuple[str, str]]], song: dict) -> bool:
-    return _match_file(idx, song) is not None
-
 
 def track_on_disk(output_dir: str, song: dict) -> bool:
-    """Public one-shot presence check for a single song (rebuilds the dir index)."""
-    return _song_present(_present_index(output_dir), song)
+    """One-shot presence check for a single song (rebuilds the dir index)."""
+    return matching.find_song(matching.index_dir(output_dir), song) is not None
 
 
-async def _download_in_chunks(songs: list[dict], output_dir: str, on_line, target_id: str) -> tuple[int, list[dict], str]:
+async def download_one(target: dict, song: dict) -> tuple[bool, str | None]:
+    """Download one pre-resolved song into a target's folder.
+
+    Success is judged by the file landing on disk — spotdl exits 0 even when
+    nothing was written. Returns (landed, failure reason).
+    """
+    from app import database as db
+    from app import downloader
+    out_dir = downloader.music_dir(target)
+    code, output = await downloader.download_from_meta([song], out_dir)
+    if track_on_disk(out_dir, song):
+        db.mark_downloaded_many(target["id"], [song])
+        db.remove_failed_track(target["id"], song["song_id"])
+        return True, None
+    return False, downloader.classify_failure(output) if code != 0 else "Download finished but no file appeared"
+
+
+async def _download_in_chunks(songs: list[dict], output_dir: str, on_line, target_id: str
+                              ) -> tuple[int, list[dict], str]:
     """Download new tracks (spotdl Song dicts) in batches.
 
     Metadata is pre-resolved (no per-track Spotify lookups). Marking by on-disk
@@ -134,19 +114,17 @@ async def _download_in_chunks(songs: list[dict], output_dir: str, on_line, targe
     """
     from app import database as db
     from app import downloader
-    outputs, landed = [], 0
+    outputs, landed_ids = [], set()
     for i in range(0, len(songs), _CHUNK):
         chunk = songs[i:i + _CHUNK]
         _code, output = await downloader.download_from_meta(chunk, output_dir, on_line=on_line)
         outputs.append(output)
-        idx = _present_index(output_dir)
-        for s in chunk:
-            if _song_present(idx, s):
-                db.mark_downloaded(s["song_id"], s["name"], s["artist"], target_id)
-                landed += 1
-    idx = _present_index(output_dir)
-    failed = [s for s in songs if not _song_present(idx, s)]
-    return landed, failed, "\n".join(outputs)
+        idx = matching.index_dir(output_dir)
+        landed = [s for s in chunk if matching.find_song(idx, s)]
+        db.mark_downloaded_many(target_id, landed)
+        landed_ids.update(s["song_id"] for s in landed)
+    failed = [s for s in songs if s["song_id"] not in landed_ids]
+    return len(landed_ids), failed, "\n".join(outputs)
 
 
 async def _run_sync(target_id: str, force: bool = False):
@@ -196,49 +174,53 @@ async def _sync_target(target_id: str, force: bool):
         log_id = db.log_sync_start(target_id)
         logger.info("Starting sync for %s (%s)", target["name"], target_id)
 
-        if target["type"] in ("playlist", "liked_songs", "album"):
-            # spotdl authenticates app-only (client credentials), which can't read
-            # PRIVATE playlists. So we resolve the track list ourselves (user auth)
-            # and hand spotdl pre-resolved metadata — no per-track Spotify lookups.
-            # Albums go through the same path so their failures land in failed_tracks
-            # and surface in the retry UI, just like playlists/liked.
-            if target["type"] == "playlist":
-                all_songs = spotify.get_playlist_song_meta(target_id)
-            elif target["type"] == "album":
-                all_songs = spotify.get_album_song_meta(target_id)
-            else:
-                all_songs = spotify.get_liked_song_meta()
-            output_dir = downloader.music_dir(target)
-            already = db.get_downloaded_ids(target_id)
-            new_songs = [s for s in all_songs if s["song_id"] not in already]
-            state["total"] = len(all_songs)
-            state["skipped"] = len(all_songs) - len(new_songs)
-            prog.set_progress(target_id, {"status": "running", **state})   # "0 of N" before downloads
-            landed, failed, output = await _download_in_chunks(new_songs, output_dir, on_line, target_id)
-            db.replace_failed_tracks(target_id, failed)
-            # A real failure only when there was new work and NOTHING landed — by our
-            # on-disk match or by spotdl's own "Downloaded" count. The latter guards
-            # against a filename-match false-negative flipping a good sync to "error".
-            code = 0 if (not new_songs or landed > 0 or state["downloaded"] > 0) else 1
-        else:
+        if target["type"] not in ("playlist", "liked_songs", "album"):
             db.log_sync_finish(log_id, "error", f"Unknown type: {target['type']}")
             prog.set_progress(target_id, {"status": "error", "message": "Unknown type", **state})
             return
 
-        status = "ok" if code == 0 else "error"
-        db.log_sync_finish(log_id, status, output[-2000:])
+        # spotdl authenticates app-only (client credentials), which can't read
+        # PRIVATE playlists. So we resolve the track list ourselves (user auth)
+        # and hand spotdl pre-resolved metadata — no per-track Spotify lookups.
+        # spotipy is blocking; a big playlist is many paged requests, so keep it
+        # off the event loop or every page and progress poll stalls meanwhile.
+        all_songs = await asyncio.to_thread(spotify.get_target_song_meta, target)
+        db.replace_target_tracks(target_id, all_songs)
+        output_dir = downloader.music_dir(target)
+        already = db.get_downloaded_ids(target_id)
+        # A track not recorded for this target but already in its folder (it was
+        # recorded under another playlist before downloads were tracked per
+        # target, or the DB was rebuilt) is recorded now instead of re-sent.
+        idx = matching.index_dir(output_dir)
+        todo = [s for s in all_songs if s["song_id"] not in already]
+        on_disk = [s for s in todo if matching.find_song(idx, s)]
+        db.mark_downloaded_many(target_id, on_disk)
+        on_disk_ids = {s["song_id"] for s in on_disk}
+        new_songs = [s for s in todo if s["song_id"] not in on_disk_ids]
+        state["total"] = len(all_songs)
+        state["skipped"] = len(all_songs) - len(new_songs)
+        prog.set_progress(target_id, {"status": "running", **state})   # "0 of N" before downloads
+        landed, failed, output = await _download_in_chunks(new_songs, output_dir, on_line, target_id)
+        db.replace_failed_tracks(target_id, failed)
+        # A real failure only when there was new work and NOTHING landed — by our
+        # on-disk match or by spotdl's own "Downloaded" count. The latter guards
+        # against a filename-match false-negative flipping a good sync to "error".
+        code = 0 if (not new_songs or landed > 0 or state["downloaded"] > 0) else 1
+
+        result = "ok" if code == 0 else "error"
+        parts = [f"{landed} new" if landed else "nothing new"]
+        if failed:
+            parts.append(f"{len(failed)} couldn't be downloaded")
+        db.log_sync_finish(log_id, result, output[-2000:], summary=" · ".join(parts))
         logger.info("spotdl output for %s:\n%s", target["name"], output[-3000:])
 
         if code == 0:
-            # state["total"] is the count we actually processed this run (set for
-            # every type above), so albums no longer report a stale track_count.
-            count = state["total"] or target["track_count"] or 0
-            db.set_target_synced(target_id, count)
+            db.set_target_synced(target_id, state["total"])
             # Regenerate the folder's .m3u8 (Spotify order) for external players.
             try:
-                idx = _present_index(output_dir)
+                idx = matching.index_dir(output_dir)
                 ordered = [{"filename": fn, "title": s["name"], "artist": s["artist"]}
-                           for s in all_songs if (fn := _match_file(idx, s))]
+                           for s in all_songs if (fn := matching.find_song(idx, s))]
                 downloader.write_m3u(target, ordered)
             except Exception:
                 logger.exception("Couldn't write playlist file for %s", target_id)
@@ -246,9 +228,10 @@ async def _sync_target(target_id: str, force: bool):
         prog.set_progress(target_id, {
             "status": "done" if code == 0 else "error",
             **state,
-            "message": (output[-500:] if code != 0 else None),
+            # A human reason, not spotdl's raw output (that's in the sync log).
+            "message": (f"Nothing downloaded: {downloader.classify_failure(output)}" if code != 0 else None),
         })
-        logger.info("Sync finished for %s: %s", target["name"], status)
+        logger.info("Sync finished for %s: %s", target["name"], result)
 
     except Exception as exc:
         logger.exception("Sync failed for %s", target_id)
@@ -261,8 +244,8 @@ async def _retry_failed(target_id: str):
     """Re-attempt a target's failed tracks one at a time, reporting which is being
     searched so the UI can show real per-track retry progress."""
     from app import database as db
-    from app import downloader
     from app import progress as prog
+    from app import spotify
 
     if not _claim_sync(target_id):
         logger.info("Sync already running for %s; retry skipped", target_id)
@@ -274,7 +257,6 @@ async def _retry_failed(target_id: str):
                 prog.clear_progress(target_id)
                 return
             failed = db.get_failed_tracks(target_id)
-            output_dir = downloader.music_dir(target)
             succeeded, last_result = 0, None
             try:
                 for i, f in enumerate(failed):
@@ -283,19 +265,26 @@ async def _retry_failed(target_id: str):
                         "status": "running", "mode": "retry", "current": label, "result": last_result,
                         "downloaded": succeeded, "done": i, "total": len(failed),
                     })
-                    url = f"https://open.spotify.com/track/{f['spotify_id']}"
-                    _code, output = await downloader.download_single_track(url, output_dir)
-                    song = {"name": f["name"], "artist": f["artist"],
-                            "artists": [f["artist"]], "song_id": f["spotify_id"]}
-                    if _song_present(_present_index(output_dir), song):
-                        db.mark_downloaded(f["spotify_id"], f["name"], f["artist"], target_id)
-                        db.remove_failed_track(target_id, f["spotify_id"])
-                        succeeded += 1
-                        last_result = f"✓ {f['name']} — downloaded"
-                    else:
-                        reason = downloader.classify_failure(output)
+                    # Same pre-resolved metadata path as a sync (one user-auth
+                    # lookup, then straight to YouTube) rather than handing spotdl
+                    # a Spotify URL to resolve itself.
+                    try:
+                        song = await asyncio.to_thread(spotify.get_track_song_meta, f["spotify_id"])
+                    except Exception:
+                        logger.warning("Couldn't load %s from Spotify for retry", f["spotify_id"], exc_info=True)
+                        song = None
+                    if song is None:
+                        reason = "Couldn't load this track from Spotify"
                         db.set_failed_error(target_id, f["spotify_id"], reason)
                         last_result = f"✗ {f['name']} — {reason}"
+                    else:
+                        landed, reason = await download_one(target, song)
+                        if landed:
+                            succeeded += 1
+                            last_result = f"✓ {f['name']} — downloaded"
+                        else:
+                            db.set_failed_error(target_id, f["spotify_id"], reason)
+                            last_result = f"✗ {f['name']} — {reason}"
                     prog.set_progress(target_id, {
                         "status": "running", "mode": "retry", "current": None, "result": last_result,
                         "downloaded": succeeded, "done": i + 1, "total": len(failed),
@@ -314,31 +303,35 @@ async def _retry_failed(target_id: str):
             prog.set_progress(target_id, {"status": "error", "message": "Retry ended unexpectedly"})
 
 
+def interval_for(schedule: str) -> timedelta:
+    return timedelta(**_INTERVALS.get(schedule, _INTERVALS["daily"]))
+
+
+def next_run_for(last_synced: str | None, delta: timedelta, now: datetime) -> datetime:
+    """When a target's scheduled sync should next fire.
+
+    Seeded from the last successful sync. Without this, IntervalTrigger
+    restarts the clock at now+interval on every app restart, so a target whose
+    interval exceeds the restart cadence (weekly/monthly) would never fire.
+    """
+    last_dt = status.parse_ts(last_synced)
+    if last_dt is None:
+        return now + delta
+    due = last_dt + delta
+    return due if due > now else now + timedelta(seconds=30)   # overdue → run shortly
+
+
 def register_target(target_id: str, schedule: str):
     from app import database as db
-    interval = _INTERVALS.get(schedule, dict(days=1))
-    delta = timedelta(**interval)
-    now = datetime.now(timezone.utc)
-
-    # Seed next_run from the last successful sync. Without this, IntervalTrigger
-    # restarts the clock at now+interval on every app restart, so a target whose
-    # interval exceeds the restart cadence (weekly/monthly) would never fire.
-    next_run = now + delta
+    if DISABLED:
+        return   # nothing is scheduled; manual syncs still work
+    delta = interval_for(schedule)
     target = db.get_target(target_id)
-    last = target.get("last_synced") if target else None
-    if last:
-        try:
-            last_dt = datetime.fromisoformat(last)
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=timezone.utc)
-            due = last_dt + delta
-            next_run = due if due > now else now + timedelta(seconds=30)  # overdue → run shortly
-        except ValueError:
-            pass
+    next_run = next_run_for(target.get("last_synced") if target else None, delta, datetime.now(timezone.utc))
 
     scheduler.add_job(
         _run_sync,
-        trigger=IntervalTrigger(**interval),
+        trigger=IntervalTrigger(seconds=int(delta.total_seconds())),
         id=target_id,
         kwargs={"target_id": target_id},
         replace_existing=True,
