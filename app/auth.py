@@ -59,19 +59,6 @@ def is_authenticated() -> bool:
     return True
 
 
-def get_access_token() -> str | None:
-    auth = get_auth_manager()
-    token = auth.get_cached_token()
-    if not token:
-        return None
-    if auth.is_token_expired(token):
-        try:
-            token = auth.refresh_access_token(token["refresh_token"])
-        except Exception:
-            return None
-    return token["access_token"]
-
-
 @router.get("/auth/login")
 def login(request: Request):
     global _oauth_state

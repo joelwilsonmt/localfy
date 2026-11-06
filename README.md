@@ -121,25 +121,35 @@ nothing is exposed to the public internet (only your tailnet can reach it).
 > must also be on the tailnet. If you need to reach it from outside the tailnet,
 > use `tailscale funnel` instead of `serve` to expose it publicly.
 
-### Option 3 — nginx (you already manage certs)
+### Option 3 — nginx + certbot
 
-Point a server block at the container and proxy to it:
+Install nginx and certbot (`sudo apt install nginx certbot python3-certbot-nginx`),
+then create `/etc/nginx/sites-available/localfy`:
 
 ```nginx
 server {
-    listen 443 ssl;
     server_name localfy.yourdomain.com;
-    # ssl_certificate / ssl_certificate_key managed by you (certbot, etc.)
+
     location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_pass         http://127.0.0.1:8080;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
     }
 }
 ```
 
-Set `SPOTIFY_REDIRECT_URI=https://localfy.yourdomain.com/auth/callback` and
-register it in the Spotify dashboard.
+Enable it and get a certificate (certbot patches the config and sets up renewal):
+
+```bash
+sudo ln -s /etc/nginx/sites-available/localfy /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d localfy.yourdomain.com
+```
+
+Set `SPOTIFY_REDIRECT_URI=https://localfy.yourdomain.com/auth/callback` in `.env`
+and register the same URL in the Spotify dashboard.
 
 ---
 
@@ -151,7 +161,11 @@ register it in the Spotify dashboard.
 4. Check the ones you want to track and pick a sync frequency (daily / weekly / monthly).
 5. Hit **↻ Sync** to download immediately, or let the scheduler handle it.
 
-Downloaded files land in `./music/` on the host, organized by playlist name.
+Downloaded files land in `MUSIC_HOST_PATH` on the host (`./music/` by default),
+one folder per playlist, plus `Liked Songs/`, `Albums/<Artist — Album>/` and
+`Singles/` (one-off tracks downloaded from the nav search). Each synced folder
+also gets a `<Name>.m3u8` playlist in Spotify order for Jellyfin, Navidrome, VLC
+and friends.
 
 ---
 
@@ -175,70 +189,46 @@ A new image is published automatically on every push to `main`.
 | `SPOTIFY_REDIRECT_URI` | `http://127.0.0.1:8080/auth/callback` | Must match exactly what's registered in the Spotify dashboard. Use loopback IP for local dev; HTTPS domain for servers. |
 | `DOWNLOAD_PATH` | `/music` | Where audio files are saved inside the container. |
 | `DATA_PATH` | `/data` | Where the database and sync state are stored. |
-| `AUDIO_FORMAT` | `mp3` | Output format: `mp3`, `flac`, `ogg`, `opus`, `m4a`. |
-| `AUDIO_BITRATE` | `320k` | Bitrate: `128k`, `256k`, `320k`. |
+| `AUDIO_FORMAT` | `mp3` | Output format: `mp3`, `flac`, `ogg`, `opus`, `m4a`, `wav`. Can be changed in Settings. |
+| `AUDIO_BITRATE` | `320k` | Bitrate: `auto`, `128k`, `256k`, `320k`. Can be changed in Settings. |
+| `MUSIC_HOST_PATH` | `./music` | Host folder mounted at `/music`. |
+| `DATA_HOST_PATH` | `./data` | Host folder mounted at `/data`. |
+| `PUID` / `PGID` | `1000` | Host user/group the app runs as, so downloads aren't owned by root. Use `id -u` / `id -g`. |
+| `HOST_PORT` | `8080` | Host port to publish on. |
+| `BIND_ADDR` | `0.0.0.0` | Host interface to bind. `127.0.0.1` keeps it reachable only through a local proxy (Tailscale, nginx). |
+| `LOCALFY_DISABLE_SCHEDULER` | — | Set to `1` to turn off scheduled syncs (manual syncs still work). Handy for development. |
 
 ---
 
 ## How it works
 
-- **Auth** — localfy handles the Spotify OAuth flow in-browser. Your token is cached at `/data/.cache`. spotdl uses your app's Client ID/Secret for metadata lookup (no separate login needed in the container).
-- **Sync** — playlists and albums use spotdl's `.spotdl` sync files (stored in `/data/sync/`), so only newly added tracks are downloaded on each run.
-- **Liked songs** — fetched via Spotify API, diffed against a local database, and only new additions are downloaded.
-- **No deletions** — unchecking a playlist stops future downloads. Files already on disk are never touched.
+- **Auth** — localfy handles the Spotify OAuth flow in the browser and caches your token at `/data/.cache`. spotdl only gets your app's Client ID/Secret.
+- **Sync** — localfy reads each playlist, album or Liked Songs list from Spotify with your login (so private playlists work), then hands spotdl the track metadata directly. spotdl goes straight to YouTube with no per-track Spotify lookups, which is what Spotify rate-limits. Tracks are downloaded in small batches and recorded as they land.
+- **Only new tracks** — every downloaded track is recorded per playlist in `/data/localfy.db`. A track that's already in a playlist's folder is recorded, not downloaded again.
+- **Failed tracks** — tracks spotdl couldn't find are listed on the playlist page. Retry them, or paste the right YouTube link for a track.
+- **Fast pages** — each target's track list is saved when it syncs. Pages and the player read that copy and refresh it from Spotify in the background, so they stay quick and keep working when Spotify is slow or down.
+- **No deletions** — unchecking a playlist, or removing a track from it on Spotify, never deletes files already on disk.
+- **Duplicates** — a track in several playlists is stored once per folder. Settings → Storage can replace the extra copies with hardlinks.
 
 ---
 
-## Server deployment with HTTPS
-
-Spotify requires HTTPS for any non-loopback redirect URI. The simplest approach is nginx as a reverse proxy with a free certificate from Let's Encrypt.
-
-**1. Install nginx and certbot**
+## Development
 
 ```bash
-sudo apt install nginx certbot python3-certbot-nginx
+python3.11 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/ruff check app tests
+.venv/bin/pytest -q
 ```
 
-**2. Create an nginx site config** at `/etc/nginx/sites-available/localfy`:
-
-```nginx
-server {
-    server_name localfy.yourdomain.com;
-
-    location / {
-        proxy_pass         http://127.0.0.1:8080;
-        proxy_set_header   Host              $host;
-        proxy_set_header   X-Real-IP         $remote_addr;
-        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-**3. Enable and get a certificate**
-
-```bash
-sudo ln -s /etc/nginx/sites-available/localfy /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d localfy.yourdomain.com
-```
-
-Certbot patches the config automatically and sets up auto-renewal.
-
-**4. Update your `.env`**
-
-```env
-SPOTIFY_REDIRECT_URI=https://localfy.yourdomain.com/auth/callback
-```
-
-**5. Update the Spotify dashboard**
-
-Add `https://localfy.yourdomain.com/auth/callback` as a Redirect URI in your Spotify app settings.
+To run from source, add a `docker-compose.override.yml` (gitignored) containing
+`services: {localfy: {build: .}}`, then `docker compose up --build -d`. App code is
+baked into the image, so rebuild after every change. Prefix with
+`LOCALFY_DISABLE_SCHEDULER=1` to keep scheduled syncs from running while you work.
 
 ---
 
 ## CI / Docker image
 
-Every push to `main` builds and publishes a new image to the GitHub Container Registry via GitHub Actions (`.github/workflows/docker.yml`). No configuration needed — it uses the built-in `GITHUB_TOKEN`.
+Every push to `main` runs the lint and tests, then builds and publishes a new `linux/amd64` + `linux/arm64` image to the GitHub Container Registry via GitHub Actions (`.github/workflows/docker.yml`). Pull requests run the same checks and a test build. No configuration needed — it uses the built-in `GITHUB_TOKEN`.
 
 To make the published package public, go to your GitHub repository → **Packages** → the `localfy` package → **Package settings** → change visibility to **Public**. This lets anyone `docker pull` without authenticating.

@@ -1,9 +1,12 @@
 {% extends "base.html" %}
+{% from "_icons.html" import art_placeholder %}
 {% block title %}{{ target.name }} — Localfy{% endblock %}
 
 {% block content %}
 {% set downloaded_count = tracks | selectattr("downloaded") | list | length %}
 {% set total_count = tracks | length %}
+{% set missing_count = total_count - downloaded_count %}
+{% set kind = {"playlist": "Playlist", "album": "Album", "liked_songs": "Liked songs", "singles": "Singles"}.get(target.type, "Playlist") %}
 
 <div class="page detail-page">
   <a href="/dashboard" class="back-link">← Library</a>
@@ -12,52 +15,51 @@
     {% if target.image_url %}
     <img class="detail-art" src="{{ target.image_url }}" alt="">
     {% else %}
-    <div class="detail-art-placeholder">
-      {% if target.type == "liked_songs" %}♥{% elif target.type == "album" %}💿{% else %}♫{% endif %}
-    </div>
+    {{ art_placeholder(target.type, "detail-art-placeholder") }}
     {% endif %}
     <div class="detail-meta">
-      <div class="detail-type">{{ target.type | replace("_", " ") | title }}</div>
       <h1 class="detail-title">{{ target.name }}</h1>
       <div class="detail-counts">
-        <span>{{ total_count }} tracks</span>
-        <span class="dot" id="dl-count-dot" {% if downloaded_count == 0 %}hidden{% endif %}>·</span>
-        <span class="downloaded-count {% if total_count > 0 and downloaded_count == total_count %}count-full{% else %}count-partial{% endif %}"
-              id="detail-dl-count" {% if downloaded_count == 0 %}hidden{% endif %}>{{ downloaded_count }} downloaded</span>
-        {% if target.last_synced %}
-        <span class="dot">·</span>
-        <span>Last synced {{ target.last_synced[:10] }}</span>
+        <span>{{ kind }}</span>
+        <span>{{ "{:,}".format(total_count) }} track{{ "" if total_count == 1 else "s" }}</span>
+        {% if last_synced_ago %}
+        <span title="{{ target.last_synced[:16] | replace('T', ' ') }} UTC">Synced {{ last_synced_ago }}</span>
         {% endif %}
       </div>
       {% if total_count > 0 %}
       <div class="detail-progress" id="detail-progress">
-        <div class="sync-progress-bar" style="max-width:260px">
+        <div class="sync-progress-bar">
           <div class="sync-progress-fill" id="detail-progress-fill"
                style="width: {{ (100 * downloaded_count // total_count) }}%"></div>
         </div>
-        <span class="sync-progress-text" id="detail-progress-text">{{ downloaded_count }} of {{ total_count }} downloaded</span>
+        <span class="sync-progress-text" id="detail-progress-text">{{ "{:,}".format(downloaded_count) }} of {{ "{:,}".format(total_count) }} downloaded</span>
       </div>
       <div class="sync-current" id="detail-progress-current"></div>
       {% endif %}
-      <div style="margin-top:.75rem; display:flex; align-items:center; gap:.75rem; flex-wrap:wrap;">
-        {% if downloaded_count < total_count or spotify_error %}
-        <button class="btn-sync-dl" id="detail-sync-btn">
+      <div class="detail-actions">
+        {% if downloaded_count > 0 %}
+        <button class="btn-primary btn-play" id="detail-play" aria-label="Play {{ target.name }}">▶︎ Play</button>
+        {% endif %}
+        {% if (downloaded_count < total_count or spotify_error) and not spotify_blocked %}
+        <button class="{{ 'btn-secondary' if downloaded_count > 0 else 'btn-primary' }} btn-sync-dl" id="detail-sync-btn">
           ↻ {% if downloaded_count == 0 %}Sync &amp; Download{% else %}Sync remaining{% endif %}
         </button>
         {% endif %}
         {% if downloaded_count > 0 %}
-        <a href="/targets/{{ target.id }}/download-zip" download class="btn-zip-dl">
-          ⬇ ZIP
-        </a>
+        <a href="/targets/{{ target.id }}/download-zip" download class="btn-secondary btn-zip"
+           aria-label="Download {{ target.name }} as a ZIP">⬇︎ ZIP</a>
         {% endif %}
       </div>
+      {% if not target.enabled and target.type != "singles" and not spotify_blocked %}
+      <p class="detail-note">Syncing also turns on daily auto-sync for this {{ kind | lower }}. You can switch it off in the Library.</p>
+      {% endif %}
     </div>
   </div>
 
   {% if spotify_error %}
-  <div class="error-banner" style="margin-bottom:1.5rem">
-    {% if '403' in spotify_error %}
-      Spotify's API restricts access to this playlist's track list — this happens with some public playlists not owned by you. You can still sync and download it using the button above.
+  <div class="error-banner">
+    {% if spotify_blocked %}
+      Spotify won't share this playlist's track list with apps like localfy (it does this for Spotify-made mixes and editorial playlists), so it can't be synced.
     {% else %}
       Couldn't load tracks from Spotify: {{ spotify_error }}
     {% endif %}
@@ -65,49 +67,13 @@
   </div>
   {% endif %}
 
-  {% if tracks %}
-  <div class="track-list-header">
-    <button type="button" class="tl-num tl-sort" data-sort="num" aria-sort="ascending" title="Sort by track number">#</button>
-    <button type="button" class="tl-title tl-sort" data-sort="title" aria-sort="none" title="Sort by title">Title</button>
-    <button type="button" class="tl-artist tl-sort" data-sort="artist" aria-sort="none" title="Sort by artist">Artist</button>
-    <span class="tl-action"></span>
-  </div>
-  <div class="track-list" id="track-list" data-target-id="{{ target.id }}">
-    {% for track in tracks %}
-    {% set actionable = track.downloaded or track.id %}
-    <div class="track-row {% if not track.downloaded %}not-downloaded{% endif %}"
-         {% if actionable %}tabindex="0" role="button" aria-label="{% if track.downloaded %}Play{% else %}Download{% endif %} {{ track.name }}{% if track.artist %} by {{ track.artist }}{% endif %}"{% endif %}
-         data-index="{{ loop.index0 }}"
-         data-downloaded="{{ 'true' if track.downloaded else 'false' }}"
-         data-track-id="{{ track.id or '' }}"
-         data-filename="{{ track.filename or '' }}">
-      <div class="track-num-cell">
-        <span class="track-num">{{ loop.index }}</span>
-        {% if track.downloaded %}<span class="track-play-icon" aria-hidden="true">▶</span>{% endif %}
-      </div>
-      <span class="track-title">{{ track.name }}</span>
-      <span class="track-artist">{{ track.artist }}</span>
-      <div class="track-action">
-        {% if not track.downloaded and track.id %}
-        <button class="btn-track-dl" data-track-id="{{ track.id }}" title="Download track" aria-label="Download {{ track.name }}">⬇</button>
-        {% elif track.downloaded %}
-        <span class="track-dl-done" title="Downloaded" aria-hidden="true">✓</span>
-        {% endif %}
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty-state">
-    <p>No tracks found.</p>
-  </div>
-  {% endif %}
-
+  {#- Failures come first: they're the part of this page that needs action, and
+      after a 1,000-row list nobody would scroll down to find them. -#}
   {% if failed %}
-  <div class="failed-section">
+  <section class="failed-section" id="failed" aria-labelledby="failed-heading">
     <div class="failed-head">
-      <h2>⚠ {{ failed | length }} track{{ 's' if failed|length != 1 else '' }} couldn't be downloaded</h2>
-      <button class="btn-retry-failed" id="retry-failed">↻ Retry all</button>
+      <h2 id="failed-heading">⚠︎ {{ failed | length }} track{{ 's' if failed|length != 1 else '' }} couldn't be downloaded</h2>
+      <button class="btn-secondary btn-retry-failed" id="retry-failed">↻ Retry all</button>
     </div>
     <p class="failed-hint">Usually these weren't matched on YouTube. <strong>Retry all</strong> re-searches each one, or paste the right YouTube link next to a track to grab that exact video.</p>
     <div class="failed-status" id="failed-status" role="status" aria-live="polite" hidden></div>
@@ -122,13 +88,62 @@
           {% if f.error %}<span class="failed-reason">{{ f.error }}</span>{% endif %}
         </div>
         <form class="yt-form" data-track-id="{{ f.spotify_id }}">
-          <input type="url" class="yt-input" placeholder="Paste YouTube link…"
+          <input type="url" class="yt-input" placeholder="Paste YouTube link"
                  aria-label="YouTube link for {{ f.name }}" autocomplete="off" spellcheck="false">
-          <button type="submit" class="btn-yt">Fetch</button>
+          <button type="submit" class="btn-secondary btn-yt">Fetch</button>
         </form>
       </li>
       {% endfor %}
     </ul>
+  </section>
+  {% endif %}
+
+  {% if tracks %}
+  {% if missing_count and downloaded_count %}
+  <div class="track-toolbar">
+    <button type="button" class="chip" id="filter-missing" aria-pressed="false">
+      Missing only <span class="chip-count" id="missing-count">{{ "{:,}".format(missing_count) }}</span>
+    </button>
+  </div>
+  {% endif %}
+  <div class="track-list-header">
+    <button type="button" class="tl-num tl-sort sorted-asc" data-sort="num" data-label="track number" aria-label="Track number, sorted ascending">#</button>
+    <button type="button" class="tl-title tl-sort" data-sort="title" data-label="title" aria-label="Sort by title">Title</button>
+    <button type="button" class="tl-artist tl-sort" data-sort="artist" data-label="artist" aria-label="Sort by artist">Artist</button>
+    <span class="tl-action"></span>
+  </div>
+  <div class="track-list" id="track-list" data-target-id="{{ target.id }}">
+    {% for track in tracks %}
+    {#- Downloaded rows are buttons (play). Not-downloaded rows aren't: their
+        ⬇ button is the only control, so a stray tap can't start a download. -#}
+    <div class="track-row {% if not track.downloaded %}not-downloaded{% endif %}"
+         {% if track.downloaded %}tabindex="0" role="button" aria-label="Play {{ track.name }}{% if track.artist %} by {{ track.artist }}{% endif %}"{% endif %}
+         data-index="{{ loop.index0 }}"
+         data-downloaded="{{ 'true' if track.downloaded else 'false' }}"
+         data-track-id="{{ track.id or '' }}"
+         data-filename="{{ track.filename or '' }}">
+      <div class="track-num-cell">
+        <span class="track-num">{{ loop.index }}</span>
+        {% if track.downloaded %}<span class="track-play-icon" aria-hidden="true">▶︎</span>{% endif %}
+      </div>
+      <div class="track-main">
+        <span class="track-title">{{ track.name }}</span>
+        <span class="track-sub" aria-hidden="true">{{ track.artist }}</span>
+      </div>
+      <span class="track-artist">{{ track.artist }}</span>
+      <div class="track-action">
+        {% if not track.downloaded and track.id %}
+        <button class="btn-track-dl" data-track-id="{{ track.id }}" title="Download track" aria-label="Download {{ track.name }}">⬇︎</button>
+        {% elif track.downloaded %}
+        <span class="track-dl-done" title="Downloaded" aria-hidden="true">✓</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p>No tracks found.</p>
   </div>
   {% endif %}
 </div>
@@ -161,27 +176,6 @@
       }));
   }
 
-  const _norm = s => (s || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-
-  // Recompute the "N downloaded" header count from the current rows.
-  function updateDownloadedCount() {
-    const rows = trackList.querySelectorAll('.track-row');
-    const n = trackList.querySelectorAll('.track-row[data-downloaded="true"]').length;
-    const span = document.getElementById('detail-dl-count');
-    const dot = document.getElementById('dl-count-dot');
-    if (!span) return;
-    if (n > 0) {
-      span.textContent = n + ' downloaded';
-      span.classList.toggle('count-full', n === rows.length);
-      span.classList.toggle('count-partial', n !== rows.length);
-      span.hidden = false;
-      if (dot) dot.hidden = false;
-    } else {
-      span.hidden = true;
-      if (dot) dot.hidden = true;
-    }
-  }
-
   // Flip a row to its downloaded/playable state in place (used during a live sync).
   function markRowDownloaded(row, filename) {
     row.classList.remove('not-downloaded');
@@ -195,7 +189,7 @@
     const numCell = row.querySelector('.track-num-cell');
     if (numCell && !numCell.querySelector('.track-play-icon')) {
       const ic = document.createElement('span');
-      ic.className = 'track-play-icon'; ic.setAttribute('aria-hidden', 'true'); ic.textContent = '▶';
+      ic.className = 'track-play-icon'; ic.setAttribute('aria-hidden', 'true'); ic.textContent = '▶\uFE0E';
       numCell.appendChild(ic);
     }
     const action = row.querySelector('.track-action');
@@ -203,7 +197,8 @@
   }
 
   // Poll the filesystem (no Spotify call) and turn freshly-downloaded tracks
-  // playable as they land, without a full page reload.
+  // playable as they land, without a full page reload. The server does the
+  // track-to-file matching (same rules as the sync) and returns it by track id.
   let _scanCount = -1;
   async function refreshDownloadedRows() {
     try {
@@ -211,17 +206,14 @@
       const files = d.tracks || [];
       if (files.length === _scanCount) return;   // nothing new since last check
       _scanCount = files.length;
-      const idx = {};
-      files.forEach(t => { idx[_norm(t.artist + ' ' + t.title)] = t.filename; });
+      const matches = d.matches || {};
       let changed = false;
       trackList.querySelectorAll('.track-row.not-downloaded').forEach(row => {
-        const title = row.querySelector('.track-title')?.textContent.trim() || '';
-        const artist = row.querySelector('.track-artist')?.textContent.trim() || '';
-        const fn = idx[_norm(artist + ' ' + title)];
+        const fn = matches[row.dataset.trackId];
         if (fn) { markRowDownloaded(row, fn); changed = true; }
       });
       if (changed) {
-        updateDownloadedCount();
+        _updateMissing();
         if (window.PLAYER.targetId === TARGET_ID && window.PLAYER.index !== -1) {
           window.PLAYER.resync(buildTrackList(), window.PLAYER.currentFilename);
         } else {
@@ -233,22 +225,18 @@
 
   window.PLAYER.highlightRows();
 
-  // ── Activate a track row (play if downloaded, else download) ──
+  // ── Activate a downloaded row (play / pause). Not-downloaded rows only
+  // respond through their own ⬇ button. ──
   function activateRow(row) {
-    if (!row) return;
-    if (row.dataset.downloaded === 'true') {
-      const dlRows = Array.from(trackList.querySelectorAll('.track-row')).filter(r => r.dataset.downloaded === 'true');
-      const dlIndex = dlRows.indexOf(row);
-      if (dlIndex === -1) return;
-      if (window.PLAYER.isPlaying(TARGET_ID, dlIndex)) {
-        document.getElementById('audio').pause();
-      } else {
-        window.PLAYER.load(buildTrackList(), dlIndex, TARGET_ID, IMAGE_URL || null);
-      }
-      return;
+    if (!row || row.dataset.downloaded !== 'true') return;
+    const dlRows = Array.from(trackList.querySelectorAll('.track-row')).filter(r => r.dataset.downloaded === 'true');
+    const dlIndex = dlRows.indexOf(row);
+    if (dlIndex === -1) return;
+    if (window.PLAYER.isPlaying(TARGET_ID, dlIndex)) {
+      document.getElementById('audio').pause();
+    } else {
+      window.PLAYER.load(buildTrackList(), dlIndex, TARGET_ID, IMAGE_URL || null);
     }
-    const btn = row.querySelector('.btn-track-dl');
-    if (btn && !btn.disabled) btn.click();
   }
   trackList.addEventListener('click', e => {
     if (e.target.closest('.btn-track-dl')) return;   // button handles itself
@@ -278,7 +266,12 @@
       .forEach(r => trackList.appendChild(r));
     document.querySelectorAll('.tl-sort').forEach(h => {
       const on = h.dataset.sort === key;
-      h.setAttribute('aria-sort', on ? (dir === 1 ? 'ascending' : 'descending') : 'none');
+      // aria-sort only means something on a real column header, so the state
+      // goes into the button's name instead.
+      const label = h.dataset.label;
+      h.setAttribute('aria-label', on
+        ? `${label[0].toUpperCase() + label.slice(1)}, sorted ${dir === 1 ? 'ascending' : 'descending'}`
+        : `Sort by ${label}`);
       h.classList.toggle('sorted-asc', on && dir === 1);
       h.classList.toggle('sorted-desc', on && dir === -1);
     });
@@ -368,9 +361,17 @@
 
   async function startSync() {
     if (syncBtn) { syncBtn.disabled = true; syncBtn.textContent = '↻ Starting…'; }
+    if (window.requestNotify) window.requestNotify();
     if (window.SYNC) window.SYNC.mark(TARGET_ID);
     try {
-      if (!ALREADY_ENABLED) await fetch(`/targets/${TARGET_ID}/toggle`, { method: 'POST' });
+      // Explicit enabled=true, not a flip: this runs again on "Retry", and a
+      // second flip would quietly turn tracking back off.
+      if (!ALREADY_ENABLED) {
+        await fetch(`/targets/${TARGET_ID}/toggle`, {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'enabled=true',
+        });
+      }
       const res = await fetch(`/targets/${TARGET_ID}/sync`, { method: 'POST' });
       if (!res.ok) throw new Error();
       pollSync();
@@ -381,6 +382,26 @@
     }
   }
   if (syncBtn) syncBtn.addEventListener('click', startSync);
+
+  // ── Play (from the first downloaded track in the current order) ──
+  document.getElementById('detail-play')?.addEventListener('click', e => {
+    activateRow(trackList.querySelector('.track-row[data-downloaded="true"]'));
+    if (e.detail > 0) e.currentTarget.blur();
+  });
+
+  // ── "Missing only" filter ─────────────────────────────────
+  const missingBtn = document.getElementById('filter-missing');
+  function _updateMissing() {
+    const n = trackList.querySelectorAll('.track-row.not-downloaded').length;
+    const el = document.getElementById('missing-count');
+    if (el) el.textContent = n.toLocaleString();
+    if (missingBtn && n === 0) { missingBtn.hidden = true; trackList.classList.remove('only-missing'); }
+  }
+  missingBtn?.addEventListener('click', () => {
+    const on = missingBtn.getAttribute('aria-pressed') !== 'true';
+    missingBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    trackList.classList.toggle('only-missing', on);
+  });
 
   // ── Retry failed tracks (one at a time, with live "Searching for…" status) ──
   const failedStatus = document.getElementById('failed-status');
@@ -397,7 +418,7 @@
         if (p.status === 'running' && p.mode === 'retry') {
           if (p.current) {
             const n = (p.done || 0) + 1, t = p.total || '?';
-            showFailedStatus(`🔍 Searching for ${p.current} … (${n}/${t})`);
+            showFailedStatus(`Searching for ${p.current}… (${n} of ${t})`);
           } else if (p.result) {
             showFailedStatus(p.result);
           }
@@ -478,21 +499,30 @@
       const trackId = btn.dataset.trackId;
       if (!trackId) return;
       btn.textContent = '⟳'; btn.disabled = true; btn.classList.add('downloading');
+      const title = btn.closest('.track-row')?.querySelector('.track-title')?.textContent.trim() || 'track';
+      if (window.announce) window.announce('Downloading ' + title + '…');
       try {
         const res = await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/download`, { method: 'POST' });
         if (!res.ok) throw new Error();
       } catch (_) {
-        btn.textContent = '⬇'; btn.disabled = false; btn.classList.remove('downloading');
+        btn.textContent = '⬇\uFE0E'; btn.disabled = false; btn.classList.remove('downloading');
         return;
       }
       const poll = _track(setInterval(async () => {
         try {
           const res = await fetch(`/targets/${TARGET_ID}/tracks/${trackId}/status`);
-          const { status } = await res.json();
-          if (status === 'done') { clearInterval(poll); window.navigateTo(location.pathname, false); }
+          const { status, message } = await res.json();
+          if (status === 'done') {
+            clearInterval(poll);
+            if (window.announce) window.announce('Downloaded ' + title + '.');
+            window.navigateTo(location.pathname, false);
+          }
           else if (status === 'error') {
             clearInterval(poll);
-            btn.textContent = '⬇'; btn.disabled = false; btn.classList.remove('downloading');
+            btn.textContent = '⬇\uFE0E'; btn.disabled = false; btn.classList.remove('downloading');
+            btn.title = (message || 'Download failed') + ' — click to try again';
+            btn.setAttribute('aria-label', `Download ${title} again (last try failed: ${message || 'unknown error'})`);
+            if (window.announce) window.announce(`Couldn't download ${title}. ${message || ''}`);
           }
         } catch (_) {}
       }, 2000));

@@ -6,6 +6,28 @@ def get_client() -> spotipy.Spotify:
     return spotipy.Spotify(auth_manager=get_auth_manager())
 
 
+def _playlist_total(playlist: dict) -> int | None:
+    """Track count from a playlist object. Spotify's 2026 API renamed the
+    playlist's `tracks` field to `items`; read either."""
+    for key in ("items", "tracks"):
+        value = playlist.get(key)
+        if isinstance(value, dict) and value.get("total") is not None:
+            return value["total"]
+    return None
+
+
+def _image(images: list[dict] | None) -> str | None:
+    """A ~300px image: sharp at the 160px detail size on 2x screens without
+    pulling 640px originals for every 46px card. Spotify lists largest first;
+    playlist mosaics may omit sizes, in which case take the first."""
+    if not images:
+        return None
+    sized = [i for i in images if i.get("width")]
+    if not sized:
+        return images[0]["url"]
+    return min(sized, key=lambda i: abs(i["width"] - 300))["url"]
+
+
 def get_user_playlists() -> list[dict]:
     sp = get_client()
     results = []
@@ -14,14 +36,12 @@ def get_user_playlists() -> list[dict]:
         for item in response["items"]:
             if not item:
                 continue
-            tracks = item.get("tracks")
-            track_count = tracks.get("total") if isinstance(tracks, dict) else None
             results.append({
                 "id": item["id"],
                 "name": item["name"],
                 "spotify_url": item["external_urls"]["spotify"],
-                "track_count": track_count,
-                "image_url": item["images"][0]["url"] if item.get("images") else None,
+                "track_count": _playlist_total(item),
+                "image_url": _image(item.get("images")),
                 "type": "playlist",
             })
         response = sp.next(response) if response["next"] else None
@@ -53,52 +73,10 @@ def get_saved_albums() -> list[dict]:
                 "name": f"{album['artists'][0]['name']} — {album['name']}",
                 "spotify_url": album["external_urls"]["spotify"],
                 "track_count": album["total_tracks"],
-                "image_url": album["images"][0]["url"] if album.get("images") else None,
+                "image_url": _image(album.get("images")),
                 "type": "album",
             })
         response = sp.next(response) if response["next"] else None
-    return results
-
-
-def get_playlist_tracks(playlist_id: str) -> list[dict]:
-    """Returns all tracks in a playlist as {id, name, artist, spotify_url, duration_ms}."""
-    sp = get_client()
-    results = []
-    response = sp.playlist_tracks(playlist_id, limit=100)
-    while response:
-        for item in response["items"]:
-            track = item.get("track") or item.get("item")
-            if not track or track.get("type") != "track" or track.get("is_local") or not track.get("id"):
-                continue
-            results.append({
-                "id": track["id"],
-                "name": track["name"],
-                "artist": ", ".join(a["name"] for a in track.get("artists", [])),
-                "spotify_url": track["external_urls"]["spotify"],
-                "duration_ms": track.get("duration_ms", 0),
-            })
-        response = sp.next(response) if response.get("next") else None
-    return results
-
-
-def get_album_tracks(album_id: str) -> list[dict]:
-    """Returns all tracks in an album as {id, name, artist, spotify_url, duration_ms}."""
-    sp = get_client()
-    album = sp.album(album_id)
-    album_artist = album["artists"][0]["name"] if album.get("artists") else ""
-    results = []
-    response = sp.album_tracks(album_id, limit=50)
-    while response:
-        for track in response["items"]:
-            artists = ", ".join(a["name"] for a in track.get("artists", []))
-            results.append({
-                "id": track["id"],
-                "name": track["name"],
-                "artist": artists or album_artist,
-                "spotify_url": track["external_urls"]["spotify"],
-                "duration_ms": track.get("duration_ms", 0),
-            })
-        response = sp.next(response) if response.get("next") else None
     return results
 
 
@@ -152,12 +130,12 @@ def _song_dict(track: dict, album: dict | None = None) -> dict:
 def get_playlist_info(playlist_id: str) -> dict:
     """Dashboard-item dict for an arbitrary playlist (for add-by-URL)."""
     sp = get_client()
-    p = sp.playlist(playlist_id, fields="id,name,images,external_urls,tracks.total")
+    p = sp.playlist(playlist_id, fields="id,name,images,external_urls,tracks.total,items.total")
     return {
         "id": p["id"], "name": p["name"], "type": "playlist",
         "spotify_url": p["external_urls"]["spotify"],
-        "track_count": p.get("tracks", {}).get("total", 0),
-        "image_url": p["images"][0]["url"] if p.get("images") else None,
+        "track_count": _playlist_total(p) or 0,
+        "image_url": _image(p.get("images")),
     }
 
 
@@ -170,7 +148,7 @@ def get_album_info(album_id: str) -> dict:
         "id": a["id"], "name": f"{artist} — {a['name']}", "type": "album",
         "spotify_url": a["external_urls"]["spotify"],
         "track_count": a.get("total_tracks", 0),
-        "image_url": a["images"][0]["url"] if a.get("images") else None,
+        "image_url": _image(a.get("images")),
     }
 
 
@@ -244,20 +222,12 @@ def get_liked_song_meta() -> list[dict]:
     return out
 
 
-def get_liked_track_ids() -> list[tuple[str, str, str]]:
-    """Returns list of (spotify_id, name, artist) for all liked songs."""
-    sp = get_client()
-    results = []
-    response = sp.current_user_saved_tracks(limit=50)
-    while response:
-        for item in response["items"]:
-            track = item["track"]
-            if track and track.get("id"):
-                artists = track.get("artists") or []
-                results.append((
-                    track["id"],
-                    track["name"],
-                    artists[0]["name"] if artists else "",
-                ))
-        response = sp.next(response) if response["next"] else None
-    return results
+def get_target_song_meta(target: dict) -> list[dict]:
+    """A sync target's full track list as spotdl Song dicts, in Spotify order."""
+    if target["type"] == "playlist":
+        return get_playlist_song_meta(target["id"])
+    if target["type"] == "album":
+        return get_album_song_meta(target["id"])
+    if target["type"] == "liked_songs":
+        return get_liked_song_meta()
+    raise LookupError(f"{target['type']} has no Spotify track list")

@@ -3,23 +3,19 @@
 
 {% block content %}
 <div class="page">
-  <div class="section-header" style="margin-bottom: 1.5rem;">
-    <h2>Activity</h2>
-  </div>
+  <h1 class="page-title">Activity</h1>
 
   {% if logs %}
   <div class="activity-list">
     {% for log in logs %}
-    {% if loop.changed(log.started_at[:10]) %}
-    <div class="activity-day" data-date="{{ log.started_at[:10] }}">{{ log.started_at[:10] }}</div>
-    {% endif %}
-    <div class="activity-row status-{{ log.status or 'running' }}">
+    {% set partial = log.status == 'ok' and log.summary and "couldn't" in log.summary %}
+    <div class="activity-row status-{{ 'partial' if partial else (log.status or 'running') }}">
       <span class="activity-time" data-ts="{{ log.started_at }}">{{ log.started_at[11:16] }}</span>
       <span class="activity-status-dot" title="{{ log.status or 'running' }}" aria-hidden="true"></span>
       <div class="activity-body">
         <a class="activity-target" href="/targets/{{ log.target_id }}">{{ log.target_name or log.target_id }}</a>
         <span class="activity-status-text">
-          {% if log.status == 'ok' %}synced
+          {% if log.status == 'ok' %}synced{% if log.summary %} · {{ log.summary }}{% endif %}
           {% elif log.status == 'error' %}sync failed
           {% elif log.status == 'interrupted' %}interrupted by a restart
           {% else %}running…
@@ -43,18 +39,32 @@
 
 {% block scripts %}
 <script>
-// Timestamps are stored in UTC — render them in the viewer's local time.
-document.querySelectorAll('.activity-time[data-ts]').forEach(el => {
-  const d = new Date(el.dataset.ts);
-  if (!isNaN(d)) el.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-});
-document.querySelectorAll('.activity-day[data-date]').forEach(el => {
-  const d = new Date(el.dataset.date + 'T12:00:00Z');
-  if (isNaN(d)) return;
-  const today = new Date(); today.setHours(12, 0, 0, 0);
-  const diff = Math.round((today - d) / 86400000);
-  el.textContent = diff === 0 ? 'Today' : diff === 1 ? 'Yesterday'
-    : d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
-});
+// Timestamps are stored in UTC. Show them in the viewer's local time, and
+// group rows under local-day headers (grouping by the UTC date would put an
+// evening sync under tomorrow).
+(function () {
+  const dayKey = d => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const today = new Date();
+  const yesterday = new Date(); yesterday.setDate(today.getDate() - 1);
+  function dayLabel(d) {
+    if (dayKey(d) === dayKey(today)) return 'Today';
+    if (dayKey(d) === dayKey(yesterday)) return 'Yesterday';
+    return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  }
+  let lastKey = null;
+  document.querySelectorAll('.activity-row').forEach(row => {
+    const el = row.querySelector('.activity-time[data-ts]');
+    const d = el && new Date(el.dataset.ts);
+    if (!d || isNaN(d)) return;
+    el.textContent = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (dayKey(d) !== lastKey) {
+      lastKey = dayKey(d);
+      const h = document.createElement('h2');
+      h.className = 'activity-day';
+      h.textContent = dayLabel(d);
+      row.before(h);
+    }
+  });
+})();
 </script>
 {% endblock %}

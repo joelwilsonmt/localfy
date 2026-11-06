@@ -10,3 +10,6 @@ __pycache__/
 venv/
 .DS_Store
 README.md
+tests/
+.pytest_cache/
+.ruff_cache/
