@@ -5,8 +5,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install spotdl in its own isolated environment so it can't conflict with our
-# app. Installed system-wide (not under /root) so the non-root runtime user can
-# run it.
+# app. Installed to a world-readable location (not the default /root/.local,
+# which is mode 700) so it runs as a non-root user: the PUID/PGID drop in
+# docker-entrypoint.sh, or `user: "1000:1000"` set in docker-compose.
 ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
 RUN pip install --no-cache-dir pipx && pipx install 'spotdl==4.5.0'
 
