@@ -4,6 +4,8 @@ Self-hosted Spotify sync — connect your Spotify account, pick the playlists, a
 
 Turning auto-sync off for a playlist pauses syncing without deleting any already-downloaded files.
 
+![Library: synced playlists with download progress, next-sync times and failed-track counts](docs/screenshots/library.png)
+
 <p>
   <img src="docs/screenshots/playlist.png" alt="Playlist page: Play, Sync remaining and ZIP, tracks that couldn't be downloaded with a paste-a-YouTube-link fix, and the track list with the player" width="68%">
   <img src="docs/screenshots/phone.png" alt="The same playlist page on a phone" width="28%">
