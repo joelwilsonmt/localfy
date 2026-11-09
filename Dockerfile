@@ -11,6 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
 RUN pip install --no-cache-dir pipx && pipx install 'spotdl==4.5.0'
 
+# yt-dlp solves YouTube's JavaScript download challenges with a JS runtime;
+# without one some videos fail with "YT-DLP download error". Deno is the
+# runtime it looks for (the challenge scripts ship with spotdl's yt-dlp-ejs).
+COPY --from=denoland/deno:bin-2.9.8 /deno /usr/local/bin/deno
+
 WORKDIR /app
 
 COPY requirements.txt .
