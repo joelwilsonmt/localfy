@@ -62,3 +62,48 @@ def test_dedupe_never_links_different_audio(env):
     result = downloader.dedupe_hardlinks()
     assert result["linked"] == 0
     assert (b / "Artist - Song.mp3").read_bytes() == b"y" * 1000
+
+
+def _no_hardlinks(monkeypatch):
+    """Make os.link fail the way it does on exFAT/FAT."""
+    import errno
+
+    def fail(*_a, **_k):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(downloader.os, "link", fail)
+
+
+def _dupes(env):
+    a, b = env.music / "A", env.music / "B"
+    a.mkdir()
+    b.mkdir()
+    for folder in (a, b):
+        (folder / "Artist - Song.mp3").write_bytes(b"x" * 1000)
+    return a, b
+
+
+def test_hardlink_probe_cleans_up(env):
+    assert downloader.hardlinks_supported() is True
+    assert not [p for p in os.listdir(env.music) if p.startswith(".lfy-linktest-")]
+
+
+def test_hardlink_probe_detects_exfat_like_filesystems(env, monkeypatch):
+    _no_hardlinks(monkeypatch)
+    assert downloader.hardlinks_supported() is False
+    assert not [p for p in os.listdir(env.music) if p.startswith(".lfy-linktest-")]
+
+
+def test_storage_report_flags_missing_hardlinks_only_with_duplicates(env, monkeypatch):
+    _no_hardlinks(monkeypatch)
+    assert downloader.storage_report()["hardlinks"] is None   # nothing to dedupe, not probed
+    _dupes(env)
+    report = downloader.storage_report()
+    assert report["dup_files"] == 1 and report["hardlinks"] is False
+
+
+def test_dedupe_refuses_without_hardlinks_and_leaves_files(env, monkeypatch):
+    _no_hardlinks(monkeypatch)
+    a, b = _dupes(env)
+    assert downloader.dedupe_hardlinks() == {"linked": 0, "saved_bytes": 0, "failed": 0, "unsupported": True}
+    assert os.stat(a / "Artist - Song.mp3").st_ino != os.stat(b / "Artist - Song.mp3").st_ino

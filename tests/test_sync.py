@@ -127,9 +127,10 @@ def test_sync_logs_a_summary_and_human_error(env, monkeypatch):
     assert log["status"] == "ok" and log["summary"] == "1 new · 1 couldn't be downloaded"
 
     from app import progress
-    monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [MISSING])
+    fresh = make_song("f" * 22, "Brand New", "Artist E")   # never tried before
+    monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [fresh])
     monkeypatch.setattr(downloader, "download_from_meta",
-                        FakeSpotdl(fail={MISSING["song_id"]}, code=1, output="ERROR: Video unavailable"))
+                        FakeSpotdl(fail={fresh["song_id"]}, code=1, output="ERROR: Video unavailable"))
     asyncio.run(scheduler._sync_target("p1", force=False))
     p = progress.get_progress("p1")
     assert p["status"] == "error"
@@ -147,3 +148,26 @@ def test_next_run_is_seeded_from_last_sync():
     assert scheduler.next_run_for((now - timedelta(days=60)).isoformat(), week, now) == now + timedelta(seconds=30)
     # Never synced: one interval from now.
     assert scheduler.next_run_for(None, week, now) == now + week
+
+
+def test_known_failures_failing_again_is_still_a_successful_sync(env, monkeypatch):
+    # Regression: a playlist whose only pending tracks are ones that already
+    # failed logged every run as an error and never advanced last_synced, so it
+    # showed as overdue while syncing daily.
+    add_target("p1", "P1")
+    monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [MISSING])
+    monkeypatch.setattr(downloader, "download_from_meta", FakeSpotdl(fail={MISSING["song_id"]}))
+    db.replace_failed_tracks("p1", [MISSING])            # failed on an earlier run
+    asyncio.run(scheduler._sync_target("p1", force=False))
+    log = db.get_recent_logs("p1", 1)[0]
+    assert log["status"] == "ok" and log["summary"] == "nothing new · 1 couldn't be downloaded"
+    assert db.get_target("p1")["last_synced"]
+
+
+def test_new_tracks_all_failing_is_still_an_error(env, monkeypatch):
+    add_target("p1", "P1")
+    monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [MISSING])
+    monkeypatch.setattr(downloader, "download_from_meta", FakeSpotdl(fail={MISSING["song_id"]}))
+    asyncio.run(scheduler._sync_target("p1", force=False))
+    assert db.get_recent_logs("p1", 1)[0]["status"] == "error"
+    assert db.get_target("p1")["last_synced"] is None

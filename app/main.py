@@ -778,7 +778,11 @@ def run_dedupe(request: Request):
     if redir := _require_auth(request):
         return redir
     from app.downloader import dedupe_hardlinks
-    return JSONResponse(dedupe_hardlinks())
+    result = dedupe_hardlinks()
+    if result.get("unsupported"):
+        return JSONResponse({**result, "error": "This music folder's filesystem doesn't support hardlinks."},
+                            status_code=409)
+    return JSONResponse(result)
 
 
 @app.post("/settings/audio-bitrate")

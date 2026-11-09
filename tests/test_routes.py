@@ -307,3 +307,16 @@ def test_search_limit_counts_distinct_tracks(env):
     rows = db.search_downloaded("Song", limit=2)
     assert len({r["spotify_id"] for r in rows}) == 2
     assert len(rows) == 4
+
+
+def test_dedupe_route_reports_unsupported_filesystem(client, env, monkeypatch):
+    import errno
+    from app import downloader as dl
+
+    def fail(*_a, **_k):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(dl.os, "link", fail)
+    r = client.post("/settings/dedupe")
+    assert r.status_code == 409
+    assert r.json()["unsupported"] is True and "hardlinks" in r.json()["error"]

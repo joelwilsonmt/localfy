@@ -1131,6 +1131,7 @@ nav { position: sticky; top: 0; z-index: 150; }
 .sd-name { color: var(--text); }
 .sd-meta { color: var(--muted); font-size: var(--fs-xs); }
 .sd-more { color: var(--muted); font-size: var(--fs-xs); }
+.storage-note { font-size: var(--fs-sm); color: var(--muted); max-width: 68ch; margin: 0 0 .75rem; line-height: 1.55; }
 
 /* Respect reduced-motion: no pulsing, sliding or spinning. */
 @media (prefers-reduced-motion: reduce) {

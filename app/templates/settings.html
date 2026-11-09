@@ -50,16 +50,21 @@
     <h2>Storage</h2>
     <div class="storage-summary" id="storage-summary">Scanning library…</div>
     <ul class="storage-dupes" id="storage-dupes" hidden></ul>
-    <div class="form-actions">
+    <div class="form-actions" id="dedupe-actions" hidden>
       <button class="btn-secondary" id="btn-dedupe" onclick="runDedupe()" hidden>Free up space (hardlink duplicates)</button>
       <span id="dedupe-result" class="save-note" role="status" aria-live="polite"></span>
     </div>
+    <p class="storage-note" id="dedupe-unsupported" hidden>
+      Your music folder is on a filesystem without hardlinks (exFAT and FAT don't have them),
+      so these copies can't be merged here. Nothing is wrong with the files; they just take
+      the extra space.
+    </p>
     <div class="field-hint">
       The same track downloaded into several playlist folders is stored once per folder.
       Deduplicating replaces the extra copies with
       <strong>hardlinks</strong> — every folder keeps its file,
-      but the audio is stored on disk only once. Requires the music folders to live on one
-      filesystem (true for the default Docker volume).
+      but the audio is stored on disk only once. Needs a filesystem with hardlinks (most
+      Linux and macOS ones; not exFAT or FAT), with all playlist folders on the same one.
     </div>
   </div>
 
@@ -116,13 +121,16 @@ async function saveAudio() {
 // ── Storage report + hardlink dedupe ─────────────────────────
 function fmtBytes(b) {
   if (!b) return '0 MB';
-  return b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : (b / 1e6).toFixed(0) + ' MB';
+  if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
+  return b >= 1e6 ? (b / 1e6).toFixed(0) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' KB';
 }
 
 async function loadStorage() {
   const summary = document.getElementById('storage-summary');
   const list = document.getElementById('storage-dupes');
   const btn = document.getElementById('btn-dedupe');
+  const actions = document.getElementById('dedupe-actions');
+  const unsupported = document.getElementById('dedupe-unsupported');
   try {
     const s = await fetch('/api/storage-report').then(r => r.json());
     let text = `${fmtBytes(s.total_bytes)} of audio on disk.`;
@@ -143,11 +151,16 @@ async function loadStorage() {
         list.insertAdjacentHTML('beforeend', `<li class="sd-more">…and ${s.group_count - s.top.length} more</li>`);
       }
       list.hidden = false;
-      btn.hidden = false;
+      // On exFAT/FAT the button could only fail, so explain instead.
+      btn.hidden = actions.hidden = s.hardlinks === false;
+      unsupported.hidden = s.hardlinks !== false;
     } else {
       text += ' No duplicates found.';
       list.hidden = true;
       btn.hidden = true;
+      unsupported.hidden = true;
+      // Keep the row if a dedupe just ran, so its result stays readable.
+      actions.hidden = !document.getElementById('dedupe-result').textContent;
     }
     summary.textContent = text;
   } catch (_) {
@@ -162,13 +175,16 @@ async function runDedupe() {
   const result = document.getElementById('dedupe-result');
   btn.disabled = true; btn.textContent = 'Deduplicating…';
   try {
-    const r = await fetch('/settings/dedupe', { method: 'POST' }).then(x => x.json());
+    const res = await fetch('/settings/dedupe', { method: 'POST' });
+    const r = await res.json();
+    if (!res.ok) throw new Error(r.error || '');
     result.classList.remove('is-error');
     result.textContent = `Freed ${fmtBytes(r.saved_bytes)} (${r.linked} file${r.linked !== 1 ? 's' : ''} linked${r.failed ? ', ' + r.failed + ' failed' : ''}).`;
     loadStorage();
-  } catch (_) {
+  } catch (err) {
     result.classList.add('is-error');
-    result.textContent = "Couldn't deduplicate.";
+    result.textContent = err.message ? `Couldn't deduplicate: ${err.message}` : "Couldn't deduplicate.";
+    loadStorage();
   }
   btn.disabled = false; btn.textContent = 'Free up space (hardlink duplicates)';
 }
