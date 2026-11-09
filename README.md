@@ -211,7 +211,7 @@ A new image is published automatically on every push to `main`.
 
 - **Auth** — localfy handles the Spotify OAuth flow in the browser and caches your token at `/data/.cache`. spotdl only gets your app's Client ID/Secret.
 - **Sync** — localfy reads each playlist, album or Liked Songs list from Spotify with your login (so private playlists work), then hands spotdl the track metadata directly. spotdl goes straight to YouTube with no per-track Spotify lookups, which is what Spotify rate-limits. Tracks are downloaded in small batches and recorded as they land.
-- **Only new tracks** — every downloaded track is recorded per playlist in `/data/localfy.db`. A track that's already in a playlist's folder is recorded, not downloaded again.
+- **Only new tracks** — every downloaded track is recorded per playlist in `/data/localfy.db`. A track that's already in a playlist's folder is recorded, not downloaded again; a recorded track whose file has gone missing is downloaded again.
 - **Failed tracks** — tracks spotdl couldn't find are listed on the playlist page. Retry them, or paste the right YouTube link for a track.
 - **Fast pages** — each target's track list is saved when it syncs. Pages and the player read that copy and refresh it from Spotify in the background, so they stay quick and keep working when Spotify is slow or down.
 - **No deletions** — unchecking a playlist, or removing a track from it on Spotify, never deletes files already on disk.

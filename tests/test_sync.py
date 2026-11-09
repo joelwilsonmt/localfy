@@ -171,3 +171,33 @@ def test_new_tracks_all_failing_is_still_an_error(env, monkeypatch):
     asyncio.run(scheduler._sync_target("p1", force=False))
     assert db.get_recent_logs("p1", 1)[0]["status"] == "error"
     assert db.get_target("p1")["last_synced"] is None
+
+
+def test_recorded_but_missing_tracks_are_downloaded_again(env, monkeypatch, fake_spotdl):
+    # Regression: a track recorded as downloaded whose file is gone was skipped
+    # forever (220 such tracks on one real playlist).
+    target = add_target("p1", "P1")
+    db.mark_downloaded(NEW["song_id"], NEW["name"], NEW["artist"], "p1")   # recorded, no file
+    monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [NEW])
+    asyncio.run(scheduler._sync_target("p1", force=False))
+    assert fake_spotdl.calls == [[NEW["song_id"]]]
+    assert os.path.exists(os.path.join(downloader.music_dir(target), song_filename(NEW)))
+    assert db.get_downloaded_ids("p1") == {NEW["song_id"]}
+
+
+def test_recorded_but_missing_that_fails_is_unrecorded_and_listed(env, monkeypatch, fake_spotdl):
+    add_target("p1", "P1")
+    db.mark_downloaded(MISSING["song_id"], MISSING["name"], MISSING["artist"], "p1")
+    fake_spotdl.fail = {MISSING["song_id"]}
+    monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [MISSING])
+    asyncio.run(scheduler._sync_target("p1", force=False))
+    assert db.get_downloaded_ids("p1") == set()
+    assert [f["spotify_id"] for f in db.get_failed_tracks("p1")] == [MISSING["song_id"]]
+
+
+def test_records_for_tracks_no_longer_in_the_playlist_are_left_alone(env, monkeypatch, fake_spotdl):
+    add_target("p1", "P1")
+    db.mark_downloaded(OTHER_ID := "r" * 22, "Removed", "Someone", "p1")
+    monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [])
+    asyncio.run(scheduler._sync_target("p1", force=False))
+    assert OTHER_ID in db.get_downloaded_ids("p1")
