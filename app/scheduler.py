@@ -188,6 +188,7 @@ async def _sync_target(target_id: str, force: bool):
         db.replace_target_tracks(target_id, all_songs)
         output_dir = downloader.music_dir(target)
         already = db.get_downloaded_ids(target_id)
+        known_failures = {f["spotify_id"] for f in db.get_failed_tracks(target_id)}
         # A track not recorded for this target but already in its folder (it was
         # recorded under another playlist before downloads were tracked per
         # target, or the DB was rebuilt) is recorded now instead of re-sent.
@@ -202,10 +203,14 @@ async def _sync_target(target_id: str, force: bool):
         prog.set_progress(target_id, {"status": "running", **state})   # "0 of N" before downloads
         landed, failed, output = await _download_in_chunks(new_songs, output_dir, on_line, target_id)
         db.replace_failed_tracks(target_id, failed)
-        # A real failure only when there was new work and NOTHING landed — by our
-        # on-disk match or by spotdl's own "Downloaded" count. The latter guards
-        # against a filename-match false-negative flipping a good sync to "error".
-        code = 0 if (not new_songs or landed > 0 or state["downloaded"] > 0) else 1
+        # A real failure only when there were tracks never tried before and NOTHING
+        # landed — by our on-disk match or by spotdl's own "Downloaded" count (the
+        # latter guards against a filename-match false-negative). Tracks that
+        # already failed are retried every run; failing again is expected and
+        # shows in the summary, but mustn't mark the whole sync as failed (that
+        # would also stop last_synced advancing, so the playlist reads overdue).
+        fresh = [s for s in new_songs if s["song_id"] not in known_failures]
+        code = 0 if (not fresh or landed > 0 or state["downloaded"] > 0) else 1
 
         result = "ok" if code == 0 else "error"
         parts = [f"{landed} new" if landed else "nothing new"]

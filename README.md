@@ -1,8 +1,13 @@
 # localfy
 
-Self-hosted Spotify sync — connect your Spotify account, select playlists to track, and localfy downloads new songs automatically on your chosen schedule (daily / weekly / monthly) using [spotdl](https://github.com/spotDL/spotify-downloader).
+Self-hosted Spotify sync — connect your Spotify account, pick the playlists, albums and liked songs to keep, and localfy downloads new tracks automatically on your chosen schedule (daily / weekly / monthly) using [spotdl](https://github.com/spotDL/spotify-downloader). It also plays your downloads in the browser.
 
-Unchecking a playlist pauses syncing without deleting any already-downloaded files.
+Turning auto-sync off for a playlist pauses syncing without deleting any already-downloaded files.
+
+<p>
+  <img src="docs/screenshots/playlist.png" alt="Playlist page: Play, Sync remaining and ZIP, tracks that couldn't be downloaded with a paste-a-YouTube-link fix, and the track list with the player" width="68%">
+  <img src="docs/screenshots/phone.png" alt="The same playlist page on a phone" width="28%">
+</p>
 
 ---
 
@@ -157,9 +162,9 @@ and register the same URL in the Spotify dashboard.
 
 1. Open `http://localhost:8080` (or `http://YOUR_SERVER:8080`).
 2. Click **Connect with Spotify** and authorize the app.
-3. Your playlists, liked songs, and saved albums appear on the dashboard.
-4. Check the ones you want to track and pick a sync frequency (daily / weekly / monthly).
-5. Hit **↻ Sync** to download immediately, or let the scheduler handle it.
+3. Your playlists, liked songs and saved albums appear under **In your Spotify library** on the Library page.
+4. Click **Auto-sync** on the ones you want. Each one downloads right away, moves up to **Synced**, and then keeps itself current on its schedule (daily by default; change it per playlist).
+5. **↻ Sync** on a card catches one up now. Paste any Spotify playlist or album link at the top to add one that isn't in your library.
 
 Downloaded files land in `MUSIC_HOST_PATH` on the host (`./music/` by default),
 one folder per playlist, plus `Liked Songs/`, `Albums/<Artist — Album>/` and
@@ -208,7 +213,7 @@ A new image is published automatically on every push to `main`.
 - **Failed tracks** — tracks spotdl couldn't find are listed on the playlist page. Retry them, or paste the right YouTube link for a track.
 - **Fast pages** — each target's track list is saved when it syncs. Pages and the player read that copy and refresh it from Spotify in the background, so they stay quick and keep working when Spotify is slow or down.
 - **No deletions** — unchecking a playlist, or removing a track from it on Spotify, never deletes files already on disk.
-- **Duplicates** — a track in several playlists is stored once per folder. Settings → Storage can replace the extra copies with hardlinks.
+- **Duplicates** — a track in several playlists is stored once per folder. Settings → Storage can replace the extra copies with hardlinks. That needs a filesystem with hardlinks: most Linux and macOS ones do, but exFAT and FAT (common on external drives) don't, and Settings says so instead of offering the button.
 
 ---
 

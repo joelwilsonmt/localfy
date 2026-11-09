@@ -1,5 +1,6 @@
 import asyncio
 import filecmp
+import functools
 import json
 import logging
 import os
@@ -218,6 +219,36 @@ def dir_size_cached(max_age: float = 60.0) -> int:
     return _size_cache[1]
 
 
+def hardlinks_supported(path: str | None = None) -> bool:
+    """Whether the music folder's filesystem can hardlink. exFAT and FAT can't,
+    and they're common on external drives shared with Windows or macOS."""
+    return _probe_hardlinks(os.path.realpath(path or DOWNLOAD_PATH))
+
+
+@functools.lru_cache(maxsize=8)
+def _probe_hardlinks(root: str) -> bool:
+    # There's no portable "what filesystem is this" call, so try it: link a
+    # scratch file and clean up. The answer can't change while the app runs.
+    try:
+        fd, src = tempfile.mkstemp(prefix=".lfy-linktest-", dir=root)
+    except OSError:
+        logger.warning("Couldn't probe hardlink support in %s", root, exc_info=True)
+        return False
+    os.close(fd)
+    dst = src + ".link"
+    try:
+        os.link(src, dst)
+        return True
+    except OSError:
+        return False
+    finally:
+        for p in (dst, src):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 def _duplicate_groups() -> list[tuple[int, list[tuple[str, int]]]]:
     """Audio files stored more than once: groups of identical (filename, size)
     across folders, as (size, [(path, inode)]). Inode-aware, so copies that are
@@ -257,7 +288,9 @@ def storage_report() -> dict:
         })
     top.sort(key=lambda g: -(g["size"] * (g["copies"] - 1)))
     return {"total_bytes": dir_size(), "dup_files": dup_files,
-            "wasted_bytes": wasted, "group_count": len(top), "top": top[:8]}
+            "wasted_bytes": wasted, "group_count": len(top), "top": top[:8],
+            # Only probed when there's something to dedupe; None = not checked.
+            "hardlinks": hardlinks_supported() if top else None}
 
 
 def dedupe_hardlinks() -> dict:
@@ -267,6 +300,9 @@ def dedupe_hardlinks() -> dict:
     Links via a temp name + os.replace so a failure (e.g. copies on different
     filesystems) leaves the original file untouched.
     """
+    if not hardlinks_supported():
+        # Every link would fail; say so once instead of N times.
+        return {"linked": 0, "saved_bytes": 0, "failed": 0, "unsupported": True}
     linked, saved, failed = 0, 0, 0
     for size, entries in _duplicate_groups():
         canonical, can_ino = entries[0]
