@@ -632,7 +632,10 @@ async def youtube_download_route(target_id: str, track_id: str, request: Request
                 db.remove_failed_track(target_id, track_id)
                 prog.set_track(track_id, "done")
             else:
-                reason = classify_failure(output) if code != 0 else "Download finished but no file appeared"
+                # spotdl exits 0 even on failures; read the output either way.
+                reason = classify_failure(output)
+                if reason == "Download failed" and code == 0:
+                    reason = "Download finished but no file appeared"
                 db.set_failed_error(target_id, track_id, reason)
                 prog.set_track(track_id, "error", reason)
         except Exception:
