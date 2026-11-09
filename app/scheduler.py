@@ -114,7 +114,7 @@ async def _download_in_chunks(songs: list[dict], output_dir: str, on_line, targe
     """
     from app import database as db
     from app import downloader
-    outputs, landed_ids = [], set()
+    outputs, landed_ids, failed = [], set(), []
     for i in range(0, len(songs), _CHUNK):
         chunk = songs[i:i + _CHUNK]
         _code, output = await downloader.download_from_meta(chunk, output_dir, on_line=on_line)
@@ -123,7 +123,10 @@ async def _download_in_chunks(songs: list[dict], output_dir: str, on_line, targe
         landed = [s for s in chunk if matching.find_song(idx, s)]
         db.mark_downloaded_many(target_id, landed)
         landed_ids.update(s["song_id"] for s in landed)
-    failed = [s for s in songs if s["song_id"] not in landed_ids]
+        missed = [s for s in chunk if s["song_id"] not in landed_ids]
+        # Per-track reason from this batch's output, shown on the playlist page.
+        reasons = downloader.failure_reasons(output, missed)
+        failed.extend({**s, "error": reasons[s["song_id"]]} for s in missed)
     return len(landed_ids), failed, "\n".join(outputs)
 
 

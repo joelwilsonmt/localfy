@@ -107,3 +107,62 @@ def test_dedupe_refuses_without_hardlinks_and_leaves_files(env, monkeypatch):
     a, b = _dupes(env)
     assert downloader.dedupe_hardlinks() == {"linked": 0, "saved_bytes": 0, "failed": 0, "unsupported": True}
     assert os.stat(a / "Artist - Song.mp3").st_ino != os.stat(b / "Artist - Song.mp3").st_ino
+
+
+# Real spotdl 4.5 output from the server (as captured, wrapped at 80 columns).
+_BATCH_NO_MATCH = """Processing query: /data/tmpczz_zc2s.spotdl
+YouTube Music returned no usable results for ondamike - drop that baby -
+original mix after 3 attempts
+YouTube Music returned no usable results for rob analyze, ondamike - get fresh
+after 3 attempts
+LookupError: No results found for song: Rob Analyze - Get Fresh
+Downloaded "Stanton Warriors - The One":
+https://music.youtube.com/watch?v=LDom69Ghfx4
+LookupError: No results found for song: OnDaMiKe - Drop That Baby - Original Mix
+LookupError: No results found for song: clipping. - Run It
+"""
+
+_BATCH_MIXED = """Processing query: /data/tmpet_76onz.spotdl
+Some YouTube downloads require Deno. Run spotdl --download-deno or install Deno
+system-wide.
+AudioProviderError: YT-DLP download error -
+https://music.youtube.com/watch?v=poKT-FDKWVE
+YouTube Music returned no usable results for htiekal, git - birds (feat. git)
+after 3 attempts
+LookupError: No results found for song: Htiekal - Birds (feat. Git)
+"""
+
+
+def _s(song_id, name, *artists):
+    return {"song_id": song_id, "name": name, "artists": list(artists), "artist": artists[0]}
+
+
+def test_failure_reasons_names_unmatched_songs():
+    songs = [_s("a", "Drop That Baby - Original Mix", "OnDaMiKe"),
+             _s("b", "Get Fresh", "Rob Analyze", "OnDaMiKe"),
+             _s("c", "Run It", "clipping.", "Daveed Diggs")]
+    assert downloader.failure_reasons(_BATCH_NO_MATCH, songs) == {
+        "a": "No match found on YouTube", "b": "No match found on YouTube", "c": "No match found on YouTube"}
+
+
+def test_failure_reasons_falls_back_to_the_batch_reason():
+    songs = [_s("a", "Birds (feat. Git)", "Htiekal", "Git"),   # named in a no-results line
+             _s("b", "Some Other Track", "Tuggawar")]          # only the URL-only YT-DLP error
+    reasons = downloader.failure_reasons(_BATCH_MIXED, songs)
+    assert reasons["a"] == "No match found on YouTube"
+    assert reasons["b"] == "YouTube wouldn't allow the download (needs Deno, which isn't installed)"
+
+
+def test_spotdl_runs_with_a_wide_terminal(env, monkeypatch):
+    # Keeps rich from wrapping song names across lines in the captured output.
+    seen = {}
+
+    async def fake_exec(*cmd, **kw):
+        seen.update(kw["env"])
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(downloader.asyncio, "create_subprocess_exec", fake_exec)
+    import asyncio
+    with pytest.raises(RuntimeError):
+        asyncio.run(downloader._run_async(["--version"]))
+    assert int(seen["COLUMNS"]) >= 1000
