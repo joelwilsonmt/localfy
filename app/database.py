@@ -284,6 +284,13 @@ def mark_downloaded_many(target_id: str, songs: list[dict]):
         """, [(s["song_id"], s.get("name", ""), s.get("artist", ""), target_id, now) for s in songs])
 
 
+def forget_downloads(target_id: str, spotify_ids: set[str] | list[str]):
+    """Drop download records for a target (their files are gone)."""
+    with get_conn() as conn:
+        conn.executemany("DELETE FROM downloaded_tracks WHERE target_id = ? AND spotify_id = ?",
+                         [(target_id, sid) for sid in spotify_ids])
+
+
 # --- settings ---
 
 def get_setting(key: str, default: str = None) -> str | None:

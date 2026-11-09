@@ -189,15 +189,24 @@ async def _sync_target(target_id: str, force: bool):
         output_dir = downloader.music_dir(target)
         already = db.get_downloaded_ids(target_id)
         known_failures = {f["spotify_id"] for f in db.get_failed_tracks(target_id)}
-        # A track not recorded for this target but already in its folder (it was
-        # recorded under another playlist before downloads were tracked per
-        # target, or the DB was rebuilt) is recorded now instead of re-sent.
+        # What's on disk decides what to download; the downloaded_tracks record
+        # follows it rather than the other way round.
+        # - In the folder but not recorded (recorded under another playlist
+        #   before downloads were tracked per target, or the DB was rebuilt):
+        #   record it, don't re-send it.
+        # - Recorded but no longer in the folder (deleted, or recorded by older
+        #   versions that trusted spotdl's exit code): drop the stale record and
+        #   download it again, or it would never be fetched.
         idx = matching.index_dir(output_dir)
-        todo = [s for s in all_songs if s["song_id"] not in already]
-        on_disk = [s for s in todo if matching.find_song(idx, s)]
-        db.mark_downloaded_many(target_id, on_disk)
-        on_disk_ids = {s["song_id"] for s in on_disk}
-        new_songs = [s for s in todo if s["song_id"] not in on_disk_ids]
+        present = [s for s in all_songs if matching.find_song(idx, s)]
+        present_ids = {s["song_id"] for s in present}
+        db.mark_downloaded_many(target_id, [s for s in present if s["song_id"] not in already])
+        gone = ({s["song_id"] for s in all_songs} & already) - present_ids
+        if gone:
+            logger.info("%s: %d recorded tracks are missing from disk; downloading them again",
+                        target["name"], len(gone))
+            db.forget_downloads(target_id, gone)
+        new_songs = [s for s in all_songs if s["song_id"] not in present_ids]
         state["total"] = len(all_songs)
         state["skipped"] = len(all_songs) - len(new_songs)
         prog.set_progress(target_id, {"status": "running", **state})   # "0 of N" before downloads
