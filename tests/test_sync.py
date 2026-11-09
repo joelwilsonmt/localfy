@@ -201,3 +201,13 @@ def test_records_for_tracks_no_longer_in_the_playlist_are_left_alone(env, monkey
     monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [])
     asyncio.run(scheduler._sync_target("p1", force=False))
     assert OTHER_ID in db.get_downloaded_ids("p1")
+
+
+def test_sync_records_a_reason_per_failed_track(env, monkeypatch):
+    add_target("p1", "P1")
+    out = f'LookupError: No results found for song: {MISSING["artist"]} - {MISSING["name"]}\n'
+    monkeypatch.setattr(spotify, "get_target_song_meta", lambda t: [NEW, MISSING])
+    monkeypatch.setattr(downloader, "download_from_meta", FakeSpotdl(fail={MISSING["song_id"]}, output=out))
+    asyncio.run(scheduler._sync_target("p1", force=False))
+    assert [(f["spotify_id"], f["error"]) for f in db.get_failed_tracks("p1")] == [
+        (MISSING["song_id"], "No match found on YouTube")]

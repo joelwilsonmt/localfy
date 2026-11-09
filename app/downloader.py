@@ -61,6 +61,9 @@ def classify_failure(output: str) -> str:
         return "YouTube video is age-restricted and can't be downloaded"
     if "drm" in o or "protected" in o:
         return "YouTube blocked the download (protected video)"
+    if "require deno" in o or "requires deno" in o:
+        # yt-dlp needs a JavaScript runtime to solve some of YouTube's challenges.
+        return "YouTube wouldn't allow the download (needs Deno, which isn't installed)"
     if "yt-dlp download error" in o or "audioprovidererror" in o or "unable to download" in o \
             or "requested format is not available" in o or "unable to extract" in o:
         return "YouTube wouldn't allow the download"
@@ -68,6 +71,35 @@ def classify_failure(output: str) -> str:
             or "no matching" in o or "found 0 results" in o:
         return "No match found on YouTube"
     return "Download failed"
+
+
+# spotdl's per-song failure messages. Both name the song, so a batch's output
+# can be traced back to the tracks that failed (the YT-DLP download error
+# names only a URL, so those fall back to the batch's overall reason).
+_RE_NO_RESULTS = re.compile(r'No results found for song: (.+)')
+_RE_NO_USABLE = re.compile(r'returned no usable results for (.+?) after \d+ attempts', re.S)
+
+
+def failure_reasons(output: str, songs: list[dict]) -> dict[str, str]:
+    """{song_id: reason} for songs that failed in one spotdl batch.
+
+    Songs spotdl names in a "no results" message get "No match found on
+    YouTube"; the rest get the batch's overall classify_failure() reason.
+    """
+    from app.matching import norm
+    output = output or ""
+    unmatched: set[str] = set()
+    for m in _RE_NO_RESULTS.finditer(output):
+        unmatched.add(norm(m.group(1)))                       # "Artist - Title"
+    for m in _RE_NO_USABLE.finditer(output):
+        unmatched.add(norm(re.sub(r'\s+', ' ', m.group(1))))  # "artists, ... - title" (lowercased)
+    fallback = classify_failure(output)
+    reasons = {}
+    for s in songs:
+        keys = {norm(f"{s.get('artist', '')} - {s.get('name', '')}"),
+                norm(f"{', '.join(s.get('artists') or [])} - {s.get('name', '')}")}
+        reasons[s["song_id"]] = "No match found on YouTube" if keys & unmatched else fallback
+    return reasons
 
 
 def _redact(cmd: list[str]) -> list[str]:
@@ -96,7 +128,10 @@ async def _run_async(args: list[str], on_line=None, cwd: str = None) -> tuple[in
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=cwd or DOWNLOAD_PATH,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        # COLUMNS: spotdl prints through rich, which wraps at 80 columns when
+        # it isn't writing to a terminal and would split song names across
+        # lines; failure_reasons() needs each message on one line.
+        env={**os.environ, "PYTHONUNBUFFERED": "1", "COLUMNS": "1000"},
     )
     lines = []
     async for raw in proc.stdout:
