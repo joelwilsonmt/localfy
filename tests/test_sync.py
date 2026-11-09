@@ -211,3 +211,14 @@ def test_sync_records_a_reason_per_failed_track(env, monkeypatch):
     asyncio.run(scheduler._sync_target("p1", force=False))
     assert [(f["spotify_id"], f["error"]) for f in db.get_failed_tracks("p1")] == [
         (MISSING["song_id"], "No match found on YouTube")]
+
+
+def test_download_one_reads_the_reason_even_when_spotdl_exits_zero(env, monkeypatch):
+    # Regression: spotdl exits 0 on "no results", and the single-track path
+    # labelled 57 real no-match failures "Download finished but no file appeared".
+    target = add_target("p1", "P1")
+    out = ("YouTube Music returned no usable results for remi blaze - all night long - tr649 after 3 attempts\n"
+           "LookupError: No results found for song: Remi Blaze - All Night Long - TR649\n")
+    song = make_song("n" * 22, "All Night Long - TR649", "Remi Blaze")
+    monkeypatch.setattr(downloader, "download_from_meta", FakeSpotdl(fail={song["song_id"]}, code=0, output=out))
+    assert asyncio.run(scheduler.download_one(target, song)) == (False, "No match found on YouTube")

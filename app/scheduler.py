@@ -97,7 +97,12 @@ async def download_one(target: dict, song: dict) -> tuple[bool, str | None]:
         db.mark_downloaded_many(target["id"], [song])
         db.remove_failed_track(target["id"], song["song_id"])
         return True, None
-    return False, downloader.classify_failure(output) if code != 0 else "Download finished but no file appeared"
+    # spotdl exits 0 even when it finds no match, so always read its output;
+    # "no file appeared" only when the output doesn't say why.
+    reason = downloader.failure_reasons(output, [song])[song["song_id"]]
+    if reason == "Download failed" and code == 0:
+        reason = "Download finished but no file appeared"
+    return False, reason
 
 
 async def _download_in_chunks(songs: list[dict], output_dir: str, on_line, target_id: str
